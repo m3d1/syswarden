@@ -992,10 +992,10 @@ EOF
         # Insert new rules after "# End required lines" marker
         if grep -q "# End required lines" "$UFW_RULES"; then
             sed -i "/# End required lines/a -A ufw-before-input -m set --match-set $SET_NAME src -j DROP" "$UFW_RULES"
-            sed -i "/# End required lines/a -A ufw-before-input -m set --match-set $SET_NAME src -j LOG --log-prefix '[SysWarden-BLOCK] '" "$UFW_RULES"
+            sed -i "/# End required lines/a -A ufw-before-input -m set --match-set $SET_NAME src -j LOG --log-prefix \"[SysWarden-BLOCK] \"" "$UFW_RULES"
         else
             log "WARN" "Standard UFW marker not found. Appending to end of file."
-            echo "-A ufw-before-input -m set --match-set $SET_NAME src -j LOG --log-prefix '[SysWarden-BLOCK] '" >> "$UFW_RULES"
+            echo "-A ufw-before-input -m set --match-set $SET_NAME src -j LOG --log-prefix \"[SysWarden-BLOCK] \"" >> "$UFW_RULES"
             echo "-A ufw-before-input -m set --match-set $SET_NAME src -j DROP" >> "$UFW_RULES"
         fi
 
@@ -1021,9 +1021,9 @@ EOF
             sed -i "/$GEOIP_SET_NAME/d" "$UFW_RULES"
             if grep -q "# End required lines" "$UFW_RULES"; then
                 sed -i "/# End required lines/a -A ufw-before-input -m set --match-set $GEOIP_SET_NAME src -j DROP" "$UFW_RULES"
-                sed -i "/# End required lines/a -A ufw-before-input -m set --match-set $GEOIP_SET_NAME src -j LOG --log-prefix '[SysWarden-GEO] '" "$UFW_RULES"
+                sed -i "/# End required lines/a -A ufw-before-input -m set --match-set $GEOIP_SET_NAME src -j LOG --log-prefix \"[SysWarden-GEO] \"" "$UFW_RULES"
             else
-                echo "-A ufw-before-input -m set --match-set $GEOIP_SET_NAME src -j LOG --log-prefix '[SysWarden-GEO] '" >> "$UFW_RULES"
+                echo "-A ufw-before-input -m set --match-set $GEOIP_SET_NAME src -j LOG --log-prefix \"[SysWarden-GEO] \"" >> "$UFW_RULES"
                 echo "-A ufw-before-input -m set --match-set $GEOIP_SET_NAME src -j DROP" >> "$UFW_RULES"
             fi
         fi
@@ -1037,9 +1037,9 @@ EOF
             sed -i "/$ASN_SET_NAME/d" "$UFW_RULES"
             if grep -q "# End required lines" "$UFW_RULES"; then
                 sed -i "/# End required lines/a -A ufw-before-input -m set --match-set $ASN_SET_NAME src -j DROP" "$UFW_RULES"
-                sed -i "/# End required lines/a -A ufw-before-input -m set --match-set $ASN_SET_NAME src -j LOG --log-prefix '[SysWarden-ASN] '" "$UFW_RULES"
+                sed -i "/# End required lines/a -A ufw-before-input -m set --match-set $ASN_SET_NAME src -j LOG --log-prefix \"[SysWarden-ASN] \"" "$UFW_RULES"
             else
-                echo "-A ufw-before-input -m set --match-set $ASN_SET_NAME src -j LOG --log-prefix '[SysWarden-ASN] '" >> "$UFW_RULES"
+                echo "-A ufw-before-input -m set --match-set $ASN_SET_NAME src -j LOG --log-prefix \"[SysWarden-ASN] \"" >> "$UFW_RULES"
                 echo "-A ufw-before-input -m set --match-set $ASN_SET_NAME src -j DROP" >> "$UFW_RULES"
             fi
         fi
