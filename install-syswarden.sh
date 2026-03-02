@@ -2329,6 +2329,153 @@ maxretry = 1
 bantime  = 48h
 EOF
         fi
+		
+		# 37. DYNAMIC DETECTION: STEALTH SECRETS & CONFIG HUNTING
+        if [[ -n "$RCE_LOGS" ]]; then
+            log "INFO" "Web access logs detected. Enabling Stealth Secrets Hunter Guard."
+
+            # Create Filter for sensitive file and config directory bruteforcing
+            # Catches: .env, .git, .aws, id_rsa, .sql, .bak, docker-compose, etc.
+            if [[ ! -f "/etc/fail2ban/filter.d/syswarden-secretshunter.conf" ]]; then
+                cat <<'EOF' > /etc/fail2ban/filter.d/syswarden-secretshunter.conf
+[Definition]
+failregex = ^<HOST> .* "(?:GET|POST|HEAD|PUT) .*(?:/\.env[^ ]*|/\.git/?.*|/\.aws/?.*|/\.ssh/?.*|/id_rsa[^ ]*|/id_ed25519[^ ]*|/[^ ]*\.(?:sql|bak|swp|db|sqlite3?)(?:\.gz|\.zip)?|/docker-compose\.ya?ml|/wp-config\.php\.(?:bak|save|old|txt|zip)) HTTP/.*" \d{3} .*$
+ignoreregex = 
+EOF
+            fi
+
+            cat <<EOF >> /etc/fail2ban/jail.local
+
+# --- Stealth Secrets & Config Hunting Protection ---
+[syswarden-secretshunter]
+enabled  = true
+port     = http,https
+filter   = syswarden-secretshunter
+logpath  = $RCE_LOGS
+backend  = auto
+# Zero-Tolerance policy: 1 attempt to access a sensitive config file = 48 hours kernel ban
+maxretry = 1
+bantime  = 48h
+EOF
+        fi
+		
+		# 38. DYNAMIC DETECTION: SSRF & CLOUD METADATA EXFILTRATION
+        if [[ -n "$RCE_LOGS" ]]; then
+            log "INFO" "Web access logs detected. Enabling SSRF & Cloud Metadata Guard."
+
+            # Create Filter for Server-Side Request Forgery targeting Cloud instances
+            # Catches: 169.254.169.254 (AWS/GCP/Azure/Linode metadata IP) and common metadata endpoints
+            if [[ ! -f "/etc/fail2ban/filter.d/syswarden-ssrf.conf" ]]; then
+                cat <<'EOF' > /etc/fail2ban/filter.d/syswarden-ssrf.conf
+[Definition]
+failregex = ^<HOST> .* "(?:GET|POST|HEAD|PUT) .*(?:169\.254\.169\.254|latest/meta-data|metadata\.google\.internal|/v1/user-data|/metadata/v1).* HTTP/.*" \d{3} .*$
+ignoreregex = 
+EOF
+            fi
+
+            cat <<EOF >> /etc/fail2ban/jail.local
+
+# --- SSRF & Cloud Metadata Exfiltration Protection ---
+[syswarden-ssrf]
+enabled  = true
+port     = http,https
+filter   = syswarden-ssrf
+logpath  = $RCE_LOGS
+backend  = auto
+# Zero-Tolerance
+maxretry = 1
+bantime  = 48h
+EOF
+        fi
+
+        # 39. DYNAMIC DETECTION: JNDI, LOG4J & SSTI PAYLOADS
+        if [[ -n "$RCE_LOGS" ]]; then
+            log "INFO" "Web access logs detected. Enabling JNDI & SSTI Guard."
+
+            # Create Filter for Log4Shell (JNDI) and Server-Side Template Injection (SSTI)
+            # Catches: ${jndi:ldap...}, URL-encoded equivalents, and Spring4Shell payloads in URLs AND User-Agents
+            if [[ ! -f "/etc/fail2ban/filter.d/syswarden-jndi-ssti.conf" ]]; then
+                cat <<'EOF' > /etc/fail2ban/filter.d/syswarden-jndi-ssti.conf
+[Definition]
+failregex = ^<HOST> .* "(?:GET|POST|HEAD|PUT) .*(?:\$\{jndi:|%24%7Bjndi:|class\.module\.classLoader|%24%7Bspring\.macro).* HTTP/.*" \d{3} .*$
+            ^<HOST> .* ".*" \d{3} .* "(?:\$\{jndi:|%24%7Bjndi:).*"$
+ignoreregex = 
+EOF
+            fi
+
+            cat <<EOF >> /etc/fail2ban/jail.local
+
+# --- JNDI, Log4Shell & SSTI Injection Protection ---
+[syswarden-jndi-ssti]
+enabled  = true
+port     = http,https
+filter   = syswarden-jndi-ssti
+logpath  = $RCE_LOGS
+backend  = auto
+# Zero-Tolerance
+maxretry = 1
+bantime  = 48h
+EOF
+        fi
+		
+		# 40. DYNAMIC DETECTION: API MAPPING & SWAGGER HUNTING
+        if [[ -n "$RCE_LOGS" ]]; then
+            log "INFO" "Web access logs detected. Enabling API Mapper Guard."
+
+            # Create Filter for API Blueprint Hunting (Swagger, OpenAPI, GraphiQL)
+            # Triggers strictly on 403/404 errors, meaning the attacker is GUESSING the endpoint paths
+            if [[ ! -f "/etc/fail2ban/filter.d/syswarden-apimapper.conf" ]]; then
+                cat <<'EOF' > /etc/fail2ban/filter.d/syswarden-apimapper.conf
+[Definition]
+failregex = ^<HOST> .* "(?:GET|POST|HEAD) .*(?:/swagger-ui[^ ]*|/openapi\.json|/swagger\.json|/v[1-3]/api-docs|/api-docs[^ ]*|/graphiql|/graphql/schema) HTTP/.*" (403|404) .*$
+ignoreregex = 
+EOF
+            fi
+
+            cat <<EOF >> /etc/fail2ban/jail.local
+
+# --- API Mapping & Swagger Hunting Protection ---
+[syswarden-apimapper]
+enabled  = true
+port     = http,https
+filter   = syswarden-apimapper
+logpath  = $RCE_LOGS
+backend  = auto
+# Policy: 2 attempts to find hidden API documentation = 48 hours ban
+maxretry = 2
+bantime  = 48h
+EOF
+        fi
+
+        # 41. DYNAMIC DETECTION: ADVANCED LFI & WRAPPER ABUSE
+        if [[ -n "$RCE_LOGS" ]]; then
+            log "INFO" "Web access logs detected. Enabling Advanced LFI Guard."
+
+            # Create Filter for Advanced Local File Inclusion and PHP Wrapper abuse
+            # Catches: php://, file://, expect://, /etc/passwd, /etc/shadow, and null byte (%00) injections
+            # Note: We use \x25 instead of % to prevent Python ConfigParser interpolation crashes
+            if [[ ! -f "/etc/fail2ban/filter.d/syswarden-lfi-advanced.conf" ]]; then
+                cat <<'EOF' > /etc/fail2ban/filter.d/syswarden-lfi-advanced.conf
+[Definition]
+failregex = ^<HOST> .* "(?:GET|POST|HEAD|PUT) .*(?:php://(?:filter|input|expect)|php\x253A\x252F\x252F|file://|file\x253A\x252F\x252F|zip://|phar://|/etc/passwd|\x252Fetc\x252Fpasswd|/etc/shadow|/windows/win\.ini|/windows/system32|(?:\x2500|\x252500)[^ ]*\.(?:php|py|sh|pl|rb)).* HTTP/.*" \d{3} .*$
+ignoreregex = 
+EOF
+            fi
+
+            cat <<EOF >> /etc/fail2ban/jail.local
+
+# --- Advanced LFI & Wrapper Abuse Protection ---
+[syswarden-lfi-advanced]
+enabled  = true
+port     = http,https
+filter   = syswarden-lfi-advanced
+logpath  = $RCE_LOGS
+backend  = auto
+# Zero-Tolerance
+maxretry = 1
+bantime  = 48h
+EOF
+        fi
 
         log "INFO" "Starting Fail2ban service..."
         if command -v systemctl >/dev/null; then
