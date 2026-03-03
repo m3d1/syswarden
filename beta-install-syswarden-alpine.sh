@@ -2909,6 +2909,14 @@ function generate_dashboard() {
     
     local UI_DIR="/etc/syswarden/ui"
     mkdir -p "$UI_DIR"
+	
+	# --- DYNAMIC BIND IP ---
+    local UI_BIND_IP="127.0.0.1" # Default to Localhost if no VPN
+    if [[ "${USE_WIREGUARD:-n}" == "y" ]]; then
+        local SUBNET_BASE
+        SUBNET_BASE=$(echo "$WG_SUBNET" | cut -d'.' -f1,2,3)
+        UI_BIND_IP="${SUBNET_BASE}.1"
+    fi
     
     # 1. Generating the HTML file
     cat << 'EOF' > "$UI_DIR/index.html"
@@ -3249,7 +3257,8 @@ EOF
     # 2. Creation of the Systemd/OpenRC service according to the OS
     if command -v systemctl >/dev/null; then
         # Backend Systemd (Debian, Ubuntu, RHEL)
-        cat << 'EOF' > /etc/systemd/system/syswarden-ui.service
+        # FIX: Removed quotes around EOF to allow $UI_BIND_IP expansion
+        cat << EOF > /etc/systemd/system/syswarden-ui.service
 [Unit]
 Description=SysWarden Minimal Web UI
 After=network.target
@@ -3258,7 +3267,7 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=/etc/syswarden/ui
-ExecStart=/usr/bin/python3 -m http.server 9999 --bind 10.66.66.1
+ExecStart=/usr/bin/python3 -m http.server 9999 --bind $UI_BIND_IP
 Restart=on-failure
 
 [Install]
@@ -3268,16 +3277,17 @@ EOF
         systemctl enable --now syswarden-ui >/dev/null 2>&1
     else
         # Backend OpenRC (Alpine Linux)
-        cat << 'EOF' > /etc/init.d/syswarden-ui
+        # FIX: Removed quotes around EOF, used $UI_BIND_IP, and escaped \${name}
+        cat << EOF > /etc/init.d/syswarden-ui
 #!/sbin/openrc-run
 
 name="syswarden-ui"
 description="SysWarden Minimal Web UI"
 command="/usr/bin/python3"
-command_args="-m http.server 9999 --bind 10.66.66.1"
+command_args="-m http.server 9999 --bind $UI_BIND_IP"
 command_background="yes"
 directory="/etc/syswarden/ui"
-pidfile="/run/${name}.pid"
+pidfile="/run/\${name}.pid"
 
 depend() {
     need net
@@ -3288,7 +3298,7 @@ EOF
         rc-service syswarden-ui start >/dev/null 2>&1 || true
     fi
     
-    log "INFO" "Dashboard UI enabled. Accessible via VPN at 10.66.66.1:9999"
+    log "INFO" "Dashboard UI enabled at $UI_BIND_IP:9999"
 }
 
 whitelist_ip() {
