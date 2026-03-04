@@ -3971,105 +3971,82 @@ whitelist_ip() {
         log "ERROR" "Invalid IP format."
         return
     fi
-	
-	# --- LOCAL PERSISTENCE ---
+    
+    # --- LOCAL PERSISTENCE (SINGLE SOURCE OF TRUTH) ---
     mkdir -p "$SYSWARDEN_DIR"
     touch "$WHITELIST_FILE"
     if ! grep -q "^${WL_IP}$" "$WHITELIST_FILE" 2>/dev/null; then
         echo "$WL_IP" >> "$WHITELIST_FILE"
+        log "INFO" "IP $WL_IP securely saved to $WHITELIST_FILE."
+    else
+        log "INFO" "IP $WL_IP is already in the whitelist file."
     fi
-    # -------------------------
+    # --------------------------------------------------
 
     log "INFO" "Whitelisting IP: $WL_IP on backend: $FIREWALL_BACKEND"
 
-    case "$FIREWALL_BACKEND" in
-        "nftables")
-            # Insert Rule at position 1 (Pre-Filter)
-            nft insert rule inet syswarden_table input ip saddr "$WL_IP" accept
-            # Modular Persistence
-            nft list table inet syswarden_table > /etc/syswarden/syswarden.nft
-            log "INFO" "Rule added to Nftables and saved to modular config."
-            ;;
-        
-        "firewalld")
-            # Add Rich Rule with ACCEPT action
-            firewall-cmd --permanent --add-rich-rule="rule family='ipv4' source address='$WL_IP' accept"
-            firewall-cmd --reload
-            log "INFO" "Rule added to Firewalld."
-            ;;
-        
-        "ufw")
-            # 1. Add UFW Allow Rule (High priority on user chain)
-            ufw insert 1 allow from "$WL_IP"
-            # 2. Remove from Blacklist IPSet immediately (in case it was blocked there)
-            ipset del "$SET_NAME" "$WL_IP" 2>/dev/null || true
-            ufw reload
-            log "INFO" "Rule added to UFW (and removed from current blocklist)."
-            ;;
-        
-        *)
-            # Fallback IPSet / Iptables
-            iptables -I INPUT 1 -s "$WL_IP" -j ACCEPT
-            # Persistence
-            if command -v netfilter-persistent >/dev/null; then netfilter-persistent save; 
-            elif command -v service >/dev/null && [ -f /etc/init.d/iptables ]; then service iptables save; fi
-            log "INFO" "Rule added to IPTables."
-            ;;
-    esac
+    # --- FIX: SAFE DYNAMIC WHITELISTING (STATE MACHINE) ---
+    log "INFO" "Rebuilding firewall framework to safely integrate the new IP..."
+    
+    # 1. Force loading config to ensure core variables (SSH_PORT, USE_WIREGUARD) are in RAM
+    if [[ -f "$CONF_FILE" ]]; then
+        # shellcheck source=/dev/null
+        source "$CONF_FILE"
+    fi
+    
+    # 2. Universally remove the IP from the active blocklist in memory to prevent conflicts
+    if command -v ipset >/dev/null; then
+        ipset del "$SET_NAME" "$WL_IP" 2>/dev/null || true
+    fi
+    if command -v nft >/dev/null; then
+        # Bypasses the active drop rule temporarily before reload
+        nft delete element inet syswarden_table "$SET_NAME" { "$WL_IP" } 2>/dev/null || true
+    fi
+    
+    # 3. Trigger the orchestrator to rebuild rules with the strict hierarchy
+    apply_firewall_rules
+    
+    log "SUCCESS" "IP $WL_IP safely whitelisted. Strict firewall hierarchy preserved."
+    # ------------------------------------------------------
 }
 
 blocklist_ip() {
     echo -e "\n${RED}=== SysWarden Manual Blocklist Manager ===${NC}"
     read -p "Enter IP to Block: " BL_IP
 
-    # Validation simple de l'IP
+    # Simple IP validation
     if [[ ! "$BL_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         log "ERROR" "Invalid IP format."
         return
     fi
-	
-	# --- LOCAL PERSISTENCE ---
+    
+    # --- LOCAL PERSISTENCE (SINGLE SOURCE OF TRUTH) ---
     mkdir -p "$SYSWARDEN_DIR"
     touch "$BLOCKLIST_FILE"
     if ! grep -q "^${BL_IP}$" "$BLOCKLIST_FILE" 2>/dev/null; then
         echo "$BL_IP" >> "$BLOCKLIST_FILE"
+        log "INFO" "IP $BL_IP securely saved to $BLOCKLIST_FILE."
+    else
+        log "INFO" "IP $BL_IP is already in the blocklist file."
     fi
-    # -------------------------
+    # --------------------------------------------------
 
     log "INFO" "Blocking IP: $BL_IP on backend: $FIREWALL_BACKEND"
 
-    case "$FIREWALL_BACKEND" in
-        "nftables")
-            # Insert Rule at position 1 (Immediate Drop)
-            nft insert rule inet syswarden_table input ip saddr "$BL_IP" drop
-            # Modular Persistence
-            nft list table inet syswarden_table > /etc/syswarden/syswarden.nft
-            log "INFO" "Drop rule added to Nftables and saved to modular config."
-            ;;
-        
-        "firewalld")
-            # Add Rich Rule with DROP action
-            firewall-cmd --permanent --add-rich-rule="rule family='ipv4' source address='$BL_IP' drop"
-            firewall-cmd --reload
-            log "INFO" "Drop rule added to Firewalld."
-            ;;
-        
-        "ufw")
-            # Add UFW Deny Rule (High priority)
-            ufw insert 1 deny from "$BL_IP"
-            ufw reload
-            log "INFO" "Deny rule added to UFW."
-            ;;
-        
-        *)
-            # Fallback IPSet / Iptables
-            iptables -I INPUT 1 -s "$BL_IP" -j DROP
-            # Persistence
-            if command -v netfilter-persistent >/dev/null; then netfilter-persistent save; 
-            elif command -v service >/dev/null && [ -f /etc/init.d/iptables ]; then service iptables save; fi
-            log "INFO" "Drop rule added to IPTables."
-            ;;
-    esac
+    # --- FIX: SAFE DYNAMIC BLOCKLISTING (STATE MACHINE) ---
+    log "INFO" "Rebuilding firewall framework to safely integrate the new IP..."
+    
+    # 1. Force loading config to ensure core variables (SSH_PORT, USE_WIREGUARD) are in RAM
+    if [[ -f "$CONF_FILE" ]]; then
+        # shellcheck source=/dev/null
+        source "$CONF_FILE"
+    fi
+    
+    # 2. Trigger the orchestrator to rebuild rules and load the IP into active sets
+    apply_firewall_rules
+    
+    log "SUCCESS" "IP $BL_IP safely blocklisted. Strict firewall hierarchy preserved."
+    # ------------------------------------------------------
 }
 
 protect_docker_jail() {
