@@ -42,7 +42,7 @@ LOG_FILE="/var/log/syswarden-install.log"
 CONF_FILE="/etc/syswarden.conf"
 SET_NAME="syswarden_blacklist"
 TMP_DIR=$(mktemp -d)
-VERSION="v9.51"
+VERSION="v9.52"
 SYSWARDEN_DIR="/etc/syswarden"
 WHITELIST_FILE="$SYSWARDEN_DIR/whitelist.txt"
 BLOCKLIST_FILE="$SYSWARDEN_DIR/blocklist.txt"
@@ -678,13 +678,16 @@ apply_firewall_rules() {
     # -----------------------------------
     
     if [[ "$FIREWALL_BACKEND" == "nftables" ]]; then
-        log "INFO" "Configuring Nftables Base Structure (Flat Syntax for Alpine compatibility)..."
+        log "INFO" "Configuring Nftables via Atomic Transaction (Alpine Flat Syntax)..."
         
-        # OpenRC: Ensure service is enabled before applying rules
         rc-update add nftables default >/dev/null 2>&1 || true
         rc-service nftables start >/dev/null 2>&1 || true
 
-        # 1. Create Base Structure using Flat Commands (Bypasses nested parser Segfaults)
+        # --- SECURITY FIX: ATOMIC NFTABLES RELOAD ---
+        # We build the entire flat ruleset and sets inside a single file,
+        # then apply it via 'nft -f' to guarantee kernel-level atomicity.
+        # We chunk elements inside the file to bypass Alpine memory limits.
+        
         cat <<EOF > "$TMP_DIR/syswarden.nft"
 add table inet syswarden_table
 flush table inet syswarden_table
@@ -701,29 +704,20 @@ EOF
 
         cat <<EOF >> "$TMP_DIR/syswarden.nft"
 add chain inet syswarden_table input { type filter hook input priority filter - 10; policy accept; }
+add rule inet syswarden_table input ct state established,related accept
 EOF
 
-        # 2. Top Priority Rules (Connection Tracking)
-        echo "add rule inet syswarden_table input ct state established,related accept" >> "$TMP_DIR/syswarden.nft"
-
-        # --- STRICT WIREGUARD SSH CLOAKING ---
         if [[ "${USE_WIREGUARD:-n}" == "y" ]]; then
-            # Fix: Multiple iifname negations in a single rule cause Nftables parser to fail silently.
-            # We explicitly accept wg0/lo, and strictly drop all other SSH traffic.
-            # Placed BEFORE the Whitelist, ensuring even whitelisted admins must use the VPN for SSH.
             echo "add rule inet syswarden_table input iifname { \"wg0\", \"lo\" } tcp dport ${SSH_PORT:-22} accept" >> "$TMP_DIR/syswarden.nft"
             echo "add rule inet syswarden_table input tcp dport ${SSH_PORT:-22} log prefix \"[SysWarden-SSH-DROP] \" drop" >> "$TMP_DIR/syswarden.nft"
         fi
-        # -------------------------------------
 
-        # --- FIX: RE-INJECT WHITELIST ACCEPT RULES ---
         if [[ -s "$WHITELIST_FILE" ]]; then
             while IFS= read -r wl_ip; do
                 [[ -z "$wl_ip" ]] && continue
                 echo "add rule inet syswarden_table input ip saddr $wl_ip accept" >> "$TMP_DIR/syswarden.nft"
             done < "$WHITELIST_FILE"
         fi
-        # ---------------------------------------------
 
         if [[ "${GEOBLOCK_COUNTRIES:-none}" != "none" ]] && [[ -s "$GEOIP_FILE" ]]; then
             echo "add rule inet syswarden_table input ip saddr @$GEOIP_SET_NAME log prefix \"[SysWarden-GEO] \" drop" >> "$TMP_DIR/syswarden.nft"
@@ -738,46 +732,41 @@ add rule inet syswarden_table input ip saddr @$SET_NAME log prefix "[SysWarden-B
 add rule inet syswarden_table input tcp dport { 23, 445, 1433, 3389, 5900 } log prefix "[SysWarden-BLOCK] " drop
 EOF
 
-        # Apply Base Structure First
-        nft -f "$TMP_DIR/syswarden.nft"
-
-        # 3. Populate Sets in Chunks
-        log "INFO" "Populating Nftables sets in chunks (Bypassing memory limits)..."
-        
+        log "INFO" "Populating Nftables sets atomically in chunks (Bypassing memory limits)..."
         if [[ -s "$FINAL_LIST" ]]; then
             cat "$FINAL_LIST" | xargs -n 5000 | while read -r chunk; do
-                nft "add element inet syswarden_table $SET_NAME { $(echo "$chunk" | tr ' ' ',') }" 2>/dev/null || true
+                echo "add element inet syswarden_table $SET_NAME { $(echo "$chunk" | tr ' ' ',') }" >> "$TMP_DIR/syswarden.nft"
             done
         fi
 
         if [[ "${GEOBLOCK_COUNTRIES:-none}" != "none" ]] && [[ -s "$GEOIP_FILE" ]]; then
             cat "$GEOIP_FILE" | xargs -n 5000 | while read -r chunk; do
-                nft "add element inet syswarden_table $GEOIP_SET_NAME { $(echo "$chunk" | tr ' ' ',') }" 2>/dev/null || true
+                echo "add element inet syswarden_table $GEOIP_SET_NAME { $(echo "$chunk" | tr ' ' ',') }" >> "$TMP_DIR/syswarden.nft"
             done
         fi
 
         if [[ "${BLOCK_ASNS:-none}" != "none" ]] && [[ -s "$ASN_FILE" ]]; then
             cat "$ASN_FILE" | xargs -n 5000 | while read -r chunk; do
-                nft "add element inet syswarden_table $ASN_SET_NAME { $(echo "$chunk" | tr ' ' ',') }" 2>/dev/null || true
+                echo "add element inet syswarden_table $ASN_SET_NAME { $(echo "$chunk" | tr ' ' ',') }" >> "$TMP_DIR/syswarden.nft"
             done
         fi
+
+        log "INFO" "Applying Atomic Nftables Transaction to the Kernel..."
+        nft -f "$TMP_DIR/syswarden.nft"
+        # --------------------------------------------
 
         # --- MODULAR PERSISTENCE (ZERO-TOUCH) ---
         log "INFO" "Saving SysWarden Nftables table to isolated config..."
         mkdir -p /etc/syswarden
-        # FIX: Export ONLY our specific table
         nft list table inet syswarden_table > /etc/syswarden/syswarden.nft
 
         local MAIN_NFT_CONF="/etc/nftables.nft"
         if [[ -f "$MAIN_NFT_CONF" ]]; then
-            # Inject include directive securely if not already present
             if ! grep -q 'include "/etc/syswarden/syswarden.nft"' "$MAIN_NFT_CONF"; then
-                log "INFO" "Injecting include directive into $MAIN_NFT_CONF..."
                 echo -e '\n# Added by SysWarden' >> "$MAIN_NFT_CONF"
                 echo 'include "/etc/syswarden/syswarden.nft"' >> "$MAIN_NFT_CONF"
             fi
         else
-            # Create a basic standard configuration if the file doesn't exist
             log "WARN" "$MAIN_NFT_CONF not found. Creating basic layout."
             echo '#!/usr/sbin/nft -f' > "$MAIN_NFT_CONF"
             echo 'flush ruleset' >> "$MAIN_NFT_CONF"
@@ -984,7 +973,7 @@ EOF
         if [[ -f "/var/log/nginx/access.log" ]] || [[ -f "/var/log/nginx/error.log" ]]; then
             log "INFO" "Nginx logs detected. Enabling Nginx Jail."
             if [[ ! -f "/etc/fail2ban/filter.d/nginx-scanner.conf" ]]; then
-                echo -e "[Definition]\nfailregex = ^<HOST>.*\"(GET|POST|HEAD).*\" (400|401|403|404|444) .*$\nignoreregex =" > /etc/fail2ban/filter.d/nginx-scanner.conf
+                echo -e "[Definition]\nfailregex = ^<HOST> \\S+ \\S+ \\[.*?\\] \"(GET|POST|HEAD).*\" (400|401|403|404|444) .*$\nignoreregex =" > /etc/fail2ban/filter.d/nginx-scanner.conf
             fi
             cat <<EOF >> /etc/fail2ban/jail.local
 
@@ -1017,7 +1006,7 @@ EOF
         if [[ -n "$APACHE_LOG" ]]; then
             log "INFO" "Apache logs detected. Enabling Apache Jail."
             if [[ ! -f "/etc/fail2ban/filter.d/apache-scanner.conf" ]]; then
-                echo -e "[Definition]\nfailregex = ^<HOST> .+\"(GET|POST|HEAD) .+\" (400|401|403|404) .+\$\nignoreregex =" > /etc/fail2ban/filter.d/apache-scanner.conf
+                echo -e "[Definition]\nfailregex = ^<HOST> \\S+ \\S+ \\[.*?\\] \"(GET|POST|HEAD) .+\" (400|401|403|404) .+\$\nignoreregex =" > /etc/fail2ban/filter.d/apache-scanner.conf
             fi
             cat <<EOF >> /etc/fail2ban/jail.local
 
@@ -1134,7 +1123,7 @@ EOF
         if [[ -n "$WP_LOG" ]]; then
             log "INFO" "Web logs available. Configuring WordPress Jail."
             if [[ ! -f "/etc/fail2ban/filter.d/wordpress-auth.conf" ]]; then
-                echo -e "[Definition]\nfailregex = ^<HOST> .* \"POST .*(wp-login\.php|xmlrpc\.php) HTTP.*\" 200\nignoreregex =" > /etc/fail2ban/filter.d/wordpress-auth.conf
+                echo -e "[Definition]\nfailregex = ^<HOST> \\S+ \\S+ \\[.*?\\] \"POST .*(wp-login\.php|xmlrpc\.php) HTTP.*\" 200\nignoreregex =" > /etc/fail2ban/filter.d/wordpress-auth.conf
             fi
             cat <<EOF >> /etc/fail2ban/jail.local
 
@@ -1165,7 +1154,7 @@ EOF
             if [[ ! -f "/etc/fail2ban/filter.d/drupal-auth.conf" ]]; then
                 cat <<'EOF' > /etc/fail2ban/filter.d/drupal-auth.conf
 [Definition]
-failregex = ^<HOST> .* "POST .*(?:/user/login|\?q=user/login) HTTP.*" 200.*$
+failregex = ^<HOST> \S+ \S+ \[.*?\] "POST .*(?:/user/login|\?q=user/login) HTTP.*" 200.*$
 ignoreregex = 
 EOF
             fi
@@ -1302,7 +1291,7 @@ EOF
             if [[ -n "$PMA_LOG" ]]; then
                 log "INFO" "phpMyAdmin detected. Enabling PMA Jail."
                 if [[ ! -f "/etc/fail2ban/filter.d/phpmyadmin-custom.conf" ]]; then
-                     echo -e "[Definition]\nfailregex = ^<HOST> -.*\"POST .*phpmyadmin.* HTTP.*\" 200\nignoreregex =" > /etc/fail2ban/filter.d/phpmyadmin-custom.conf
+                     echo -e "[Definition]\nfailregex = ^<HOST> \\S+ \\S+ \\[.*?\\] \"POST .*phpmyadmin.* HTTP.*\" 200\nignoreregex =" > /etc/fail2ban/filter.d/phpmyadmin-custom.conf
                 fi
                 cat <<EOF >> /etc/fail2ban/jail.local
 
@@ -1761,7 +1750,7 @@ EOF
             if [[ ! -f "/etc/fail2ban/filter.d/syswarden-revshell.conf" ]]; then
                 cat <<'EOF' > /etc/fail2ban/filter.d/syswarden-revshell.conf
 [Definition]
-failregex = ^<HOST> .* "(?:GET|POST|HEAD|PUT) .*(?:/bin/bash|\x252Fbin\x252Fbash|/bin/sh|\x252Fbin\x252Fsh|nc\s+-e|nc\x2520-e|nc\s+-c|curl\s+http|curl\x2520http|wget\s+http|wget\x2520http|python\s+-c|php\s+-r|;\s*bash\s+-i|&\s*bash\s+-i).*" .*$
+failregex = ^<HOST> \S+ \S+ \[.*?\] "(?:GET|POST|HEAD|PUT) .*(?:/bin/bash|\x252Fbin\x252Fbash|/bin/sh|\x252Fbin\x252Fsh|nc\s+-e|nc\x2520-e|nc\s+-c|curl\s+http|curl\x2520http|wget\s+http|wget\x2520http|python\s+-c|php\s+-r|;\s*bash\s+-i|&\s*bash\s+-i).*" .*$
 ignoreregex = 
 EOF
             fi
@@ -1789,7 +1778,7 @@ EOF
             if [[ ! -f "/etc/fail2ban/filter.d/syswarden-aibots.conf" ]]; then
                 cat <<'EOF' > /etc/fail2ban/filter.d/syswarden-aibots.conf
 [Definition]
-failregex = ^<HOST> .* "(?:GET|POST|HEAD) .*" \d{3} .* ".*(?:GPTBot|ChatGPT-User|OAI-SearchBot|ClaudeBot|Claude-Web|Anthropic-ai|Google-Extended|PerplexityBot|Omgili|FacebookBot|Bytespider|CCBot|Diffbot|Amazonbot|Applebot-Extended|cohere-ai).*".*$
+failregex = ^<HOST> \S+ \S+ \[.*?\] "(?:GET|POST|HEAD) .*" \d{3} .* ".*(?:GPTBot|ChatGPT-User|OAI-SearchBot|ClaudeBot|Claude-Web|Anthropic-ai|Google-Extended|PerplexityBot|Omgili|FacebookBot|Bytespider|CCBot|Diffbot|Amazonbot|Applebot-Extended|cohere-ai).*".*$
 ignoreregex = 
 EOF
             fi
@@ -1818,7 +1807,7 @@ EOF
             if [[ ! -f "/etc/fail2ban/filter.d/syswarden-badbots.conf" ]]; then
                 cat <<'EOF' > /etc/fail2ban/filter.d/syswarden-badbots.conf
 [Definition]
-failregex = ^<HOST> .* "(?:GET|POST|HEAD|PUT|DELETE|OPTIONS) .*" \d{3} .* ".*(?:Nuclei|sqlmap|Nikto|ZmEu|OpenVAS|wpscan|masscan|zgrab|CensysInspect|Shodan|NetSystemsResearch|projectdiscovery|Go-http-client|Java/|Hello World|python-requests|libwww-perl|Acunetix|Nmap|Netsparker|BurpSuite|DirBuster|dirb|gobuster|httpx|ffuf).*".*$
+failregex = ^<HOST> \S+ \S+ \[.*?\] "(?:GET|POST|HEAD|PUT|DELETE|OPTIONS) .*" \d{3} .* ".*(?:Nuclei|sqlmap|Nikto|ZmEu|OpenVAS|wpscan|masscan|zgrab|CensysInspect|Shodan|NetSystemsResearch|projectdiscovery|Go-http-client|Java/|Hello World|python-requests|libwww-perl|Acunetix|Nmap|Netsparker|BurpSuite|DirBuster|dirb|gobuster|httpx|ffuf).*".*$
 ignoreregex = 
 EOF
             fi
@@ -1847,7 +1836,7 @@ EOF
             if [[ ! -f "/etc/fail2ban/filter.d/syswarden-httpflood.conf" ]]; then
                 cat <<'EOF' > /etc/fail2ban/filter.d/syswarden-httpflood.conf
 [Definition]
-failregex = ^<HOST> .* "(?:GET|POST|HEAD|PUT|DELETE|OPTIONS) .*" \d{3} .*$
+failregex = ^<HOST> \S+ \S+ \[.*?\] "(?:GET|POST|HEAD|PUT|DELETE|OPTIONS) .*" \d{3} .*$
 ignoreregex = 
 EOF
             fi
@@ -1877,7 +1866,7 @@ EOF
             if [[ ! -f "/etc/fail2ban/filter.d/syswarden-webshell.conf" ]]; then
                 cat <<'EOF' > /etc/fail2ban/filter.d/syswarden-webshell.conf
 [Definition]
-failregex = ^<HOST> .* "POST .*(?:/upload|/media|/images|/assets|/files|/tmp|/wp-content/uploads).*\.(?:php\d?|phtml|phar|aspx?|ashx|jsp|cgi|pl|py|sh|exe)(?:\?.*)? HTTP/.*" \d{3} .*$
+failregex = ^<HOST> \S+ \S+ \[.*?\] "POST .*(?:/upload|/media|/images|/assets|/files|/tmp|/wp-content/uploads).*\.(?:php\d?|phtml|phar|aspx?|ashx|jsp|cgi|pl|py|sh|exe)(?:\?.*)? HTTP/.*" \d{3} .*$
 ignoreregex = 
 EOF
             fi
@@ -1907,7 +1896,7 @@ EOF
             if [[ ! -f "/etc/fail2ban/filter.d/syswarden-sqli-xss.conf" ]]; then
                 cat <<'EOF' > /etc/fail2ban/filter.d/syswarden-sqli-xss.conf
 [Definition]
-failregex = ^<HOST> .* "(?:GET|POST|HEAD|PUT) .*(?:UNION(?:\s|\+|\x2520)SELECT|CONCAT(?:\s|\+|\x2520)?\(|WAITFOR(?:\s|\+|\x2520)DELAY|SLEEP(?:\s|\+|\x2520)?\(|\x253Cscript|\x253E|\x253C\x252Fscript|<script|alert\(|onerror=|onload=|document\.cookie|base64_decode\(|eval\(|\.\./\.\./|\x252E\x252E\x252F).*" \d{3} .*$
+failregex = ^<HOST> \S+ \S+ \[.*?\] "(?:GET|POST|HEAD|PUT) .*(?:UNION(?:\s|\+|\x2520)SELECT|CONCAT(?:\s|\+|\x2520)?\(|WAITFOR(?:\s|\+|\x2520)DELAY|SLEEP(?:\s|\+|\x2520)?\(|\x253Cscript|\x253E|\x253C\x252Fscript|<script|alert\(|onerror=|onload=|document\.cookie|base64_decode\(|eval\(|\.\./\.\./|\x252E\x252E\x252F).*" \d{3} .*$
 ignoreregex = 
 EOF
             fi
@@ -1936,7 +1925,7 @@ EOF
             if [[ ! -f "/etc/fail2ban/filter.d/syswarden-secretshunter.conf" ]]; then
                 cat <<'EOF' > /etc/fail2ban/filter.d/syswarden-secretshunter.conf
 [Definition]
-failregex = ^<HOST> .* "(?:GET|POST|HEAD|PUT) .*(?:/\.env[^ ]*|/\.git/?.*|/\.aws/?.*|/\.ssh/?.*|/id_rsa[^ ]*|/id_ed25519[^ ]*|/[^ ]*\.(?:sql|bak|swp|db|sqlite3?)(?:\.gz|\.zip)?|/docker-compose\.ya?ml|/wp-config\.php\.(?:bak|save|old|txt|zip)) HTTP/.*" \d{3} .*$
+failregex = ^<HOST> \S+ \S+ \[.*?\] "(?:GET|POST|HEAD|PUT) .*(?:/\.env[^ ]*|/\.git/?.*|/\.aws/?.*|/\.ssh/?.*|/id_rsa[^ ]*|/id_ed25519[^ ]*|/[^ ]*\.(?:sql|bak|swp|db|sqlite3?)(?:\.gz|\.zip)?|/docker-compose\.ya?ml|/wp-config\.php\.(?:bak|save|old|txt|zip)) HTTP/.*" \d{3} .*$
 ignoreregex = 
 EOF
             fi
@@ -1965,7 +1954,7 @@ EOF
             if [[ ! -f "/etc/fail2ban/filter.d/syswarden-ssrf.conf" ]]; then
                 cat <<'EOF' > /etc/fail2ban/filter.d/syswarden-ssrf.conf
 [Definition]
-failregex = ^<HOST> .* "(?:GET|POST|HEAD|PUT) .*(?:169\.254\.169\.254|latest/meta-data|metadata\.google\.internal|/v1/user-data|/metadata/v1).* HTTP/.*" \d{3} .*$
+failregex = ^<HOST> \S+ \S+ \[.*?\] "(?:GET|POST|HEAD|PUT) .*(?:169\.254\.169\.254|latest/meta-data|metadata\.google\.internal|/v1/user-data|/metadata/v1).* HTTP/.*" \d{3} .*$
 ignoreregex = 
 EOF
             fi
@@ -1994,8 +1983,8 @@ EOF
             if [[ ! -f "/etc/fail2ban/filter.d/syswarden-jndi-ssti.conf" ]]; then
                 cat <<'EOF' > /etc/fail2ban/filter.d/syswarden-jndi-ssti.conf
 [Definition]
-failregex = ^<HOST> .* "(?:GET|POST|HEAD|PUT) .*(?:\$\{jndi:|\x2524\x257Bjndi:|class\.module\.classLoader|\x2524\x257Bspring\.macro).* HTTP/.*" \d{3} .*$
-            ^<HOST> .* ".*" \d{3} .* "(?:\$\{jndi:|\x2524\x257Bjndi:).*"$
+failregex = ^<HOST> \S+ \S+ \[.*?\] "(?:GET|POST|HEAD|PUT) .*(?:\$\{jndi:|\x2524\x257Bjndi:|class\.module\.classLoader|\x2524\x257Bspring\.macro).* HTTP/.*" \d{3} .*$
+            ^<HOST> \S+ \S+ \[.*?\] ".*" \d{3} .* "(?:\$\{jndi:|\x2524\x257Bjndi:).*"$
 ignoreregex = 
 EOF
             fi
@@ -2024,7 +2013,7 @@ EOF
             if [[ ! -f "/etc/fail2ban/filter.d/syswarden-apimapper.conf" ]]; then
                 cat <<'EOF' > /etc/fail2ban/filter.d/syswarden-apimapper.conf
 [Definition]
-failregex = ^<HOST> .* "(?:GET|POST|HEAD) .*(?:/swagger-ui[^ ]*|/openapi\.json|/swagger\.json|/v[1-3]/api-docs|/api-docs[^ ]*|/graphiql|/graphql/schema) HTTP/.*" (403|404) .*$
+failregex = ^<HOST> \S+ \S+ \[.*?\] "(?:GET|POST|HEAD) .*(?:/swagger-ui[^ ]*|/openapi\.json|/swagger\.json|/v[1-3]/api-docs|/api-docs[^ ]*|/graphiql|/graphql/schema) HTTP/.*" (403|404) .*$
 ignoreregex = 
 EOF
             fi
@@ -2054,7 +2043,7 @@ EOF
             if [[ ! -f "/etc/fail2ban/filter.d/syswarden-lfi-advanced.conf" ]]; then
                 cat <<'EOF' > /etc/fail2ban/filter.d/syswarden-lfi-advanced.conf
 [Definition]
-failregex = ^<HOST> .* "(?:GET|POST|HEAD|PUT) .*(?:php://(?:filter|input|expect)|php\x253A\x252F\x252F|file://|file\x253A\x252F\x252F|zip://|phar://|/etc/passwd|\x252Fetc\x252Fpasswd|/etc/shadow|/windows/win\.ini|/windows/system32|(?:\x2500|\x252500)[^ ]*\.(?:php|py|sh|pl|rb)).* HTTP/.*" \d{3} .*$
+failregex = ^<HOST> \S+ \S+ \[.*?\] "(?:GET|POST|HEAD|PUT) .*(?:php://(?:filter|input|expect)|php\x253A\x252F\x252F|file://|file\x253A\x252F\x252F|zip://|phar://|/etc/passwd|\x252Fetc\x252Fpasswd|/etc/shadow|/windows/win\.ini|/windows/system32|(?:\x2500|\x252500)[^ ]*\.(?:php|py|sh|pl|rb)).* HTTP/.*" \d{3} .*$
 ignoreregex = 
 EOF
             fi
@@ -2158,7 +2147,7 @@ EOF
 			if [[ ! -f "/etc/fail2ban/filter.d/syswarden-silent-scanner.conf" ]]; then
 				cat <<'EOF' > /etc/fail2ban/filter.d/syswarden-silent-scanner.conf
 [Definition]
-failregex = ^<HOST> .* "(?:GET|POST|HEAD|PUT|DELETE|OPTIONS|PROPFIND) .*" (?:400|401|403|404|405|444) .*$
+failregex = ^<HOST> \S+ \S+ \[.*?\] "(?:GET|POST|HEAD|PUT|DELETE|OPTIONS|PROPFIND) .*" (?:400|401|403|404|405|444) .*$
 ignoreregex = 
 EOF
 			fi
@@ -2192,8 +2181,8 @@ EOF
 			if [[ ! -f "/etc/fail2ban/filter.d/syswarden-proxy-abuse.conf" ]]; then
 				cat <<'EOF' > /etc/fail2ban/filter.d/syswarden-proxy-abuse.conf
 [Definition]
-failregex = ^<HOST> .* "(?:CONNECT|TRACE|TRACK|PROPFIND|PROPPATCH|MKCOL|COPY|MOVE|LOCK|UNLOCK) .*" \d{3} .*$
-            ^<HOST> .* "(?:GET|POST|HEAD) (?:http|https)(?:\x253A|:)//.*" \d{3} .*$
+failregex = ^<HOST> \S+ \S+ \[.*?\] "(?:CONNECT|TRACE|TRACK|PROPFIND|PROPPATCH|MKCOL|COPY|MOVE|LOCK|UNLOCK) .*" \d{3} .*$
+            ^<HOST> \S+ \S+ \[.*?\] "(?:GET|POST|HEAD) (?:http|https)(?:\x253A|:)//.*" \d{3} .*$
 ignoreregex = 
 EOF
 			fi
@@ -2501,7 +2490,11 @@ EOF
         sed -i "s/PLACEHOLDER_F2B/$PY_F2B/" /usr/local/bin/syswarden_reporter.py
         sed -i "s/PLACEHOLDER_FW/$PY_FW/" /usr/local/bin/syswarden_reporter.py
         
-        chmod +x /usr/local/bin/syswarden_reporter.py
+        # --- SECURITY FIX: SECURE ABUSEIPDB API KEY (ALPINE) ---
+        # Permissions 750 (rwxr-x---) and ownership given to root and nobody.
+        chown root:nobody /usr/local/bin/syswarden_reporter.py
+        chmod 750 /usr/local/bin/syswarden_reporter.py
+        # -------------------------------------------------------
 
         log "INFO" "Creating OpenRC service for Reporter..."
         cat <<'EOF' > /etc/init.d/syswarden-reporter
@@ -2626,8 +2619,13 @@ setup_wireguard() {
         POSTDOWN="iptables -t nat -D POSTROUTING -s $WG_SUBNET -o $ACTIVE_IF -j MASQUERADE; iptables -D FORWARD -i wg0 -j ACCEPT; iptables -D FORWARD -o wg0 -j ACCEPT"
     fi
 
-    log "INFO" "Deploying WireGuard Server Profile..."
-    cat <<EOF > /etc/wireguard/wg0.conf
+    # --- SECURITY FIX: PREVENT TOCTOU RACE CONDITION ON KEYS ---
+    # Enclosing file creation in a umask 077 subshell to ensure native 600 permissions
+    (
+        umask 077
+        
+        log "INFO" "Deploying WireGuard Server Profile..."
+        cat <<EOF > /etc/wireguard/wg0.conf
 [Interface]
 Address = ${SERVER_VPN_IP}/24
 ListenPort = $WG_PORT
@@ -2640,10 +2638,9 @@ PublicKey = $CLIENT_PUB
 PresharedKey = $PRESHARED_KEY
 AllowedIPs = ${CLIENT_VPN_IP}/32
 EOF
-    chmod 600 /etc/wireguard/wg0.conf
 
-    log "INFO" "Generating Secure Client Profile..."
-    cat <<EOF > /etc/wireguard/clients/admin-pc.conf
+        log "INFO" "Generating Secure Client Profile..."
+        cat <<EOF > /etc/wireguard/clients/admin-pc.conf
 [Interface]
 PrivateKey = $CLIENT_PRIV
 Address = ${CLIENT_VPN_IP}/24
@@ -2657,6 +2654,8 @@ Endpoint = ${SERVER_IP}:${WG_PORT}
 AllowedIPs = 0.0.0.0/0, ::/0
 PersistentKeepalive = 25
 EOF
+    )
+    # -----------------------------------------------------------
     chmod 600 /etc/wireguard/clients/admin-pc.conf
 
     # --- OPENRC SPECIFIC SERVICE HANDLING ---
@@ -2712,46 +2711,36 @@ add_wireguard_client() {
 
     log "INFO" "Generating keys for $client_name..."
 
-    # 3. Cryptography
-    local CLIENT_PRIV; CLIENT_PRIV=$(wg genkey)
-    local CLIENT_PUB; CLIENT_PUB=$(echo "$CLIENT_PRIV" | wg pubkey)
-    local PRESHARED_KEY; PRESHARED_KEY=$(wg genpsk)
+    # --- SECURITY FIX: PREVENT TOCTOU RACE CONDITION ON KEYS ---
+    (
+        umask 077
+        
+        # 3. Cryptography
+        CLIENT_PRIV=$(wg genkey)
+        CLIENT_PUB=$(echo "$CLIENT_PRIV" | wg pubkey)
+        PRESHARED_KEY=$(wg genpsk)
 
-    # 4. Extract Server Params
-    local SERVER_PUB
-    SERVER_PUB=$(grep "PublicKey" "$admin_conf" | head -n 1 | awk -F'= ' '{print $2}' | tr -d '\r')
-    local ENDPOINT
-    ENDPOINT=$(grep "Endpoint" "$admin_conf" | head -n 1 | awk -F'= ' '{print $2}' | tr -d '\r')
+        # 4. Extract Server Params
+        SERVER_PUB=$(grep "PublicKey" "$admin_conf" | head -n 1 | awk -F'= ' '{print $2}' | tr -d '\r')
+        ENDPOINT=$(grep "Endpoint" "$admin_conf" | head -n 1 | awk -F'= ' '{print $2}' | tr -d '\r')
 
-    # 5. IP Calculation (Find highest IP and increment)
-    # Extract the base subnet (e.g., 10.66.66)
-    local SUBNET_BASE
-    SUBNET_BASE=$(grep "Address" "$wg_conf" | head -n 1 | awk -F'= ' '{print $2}' | cut -d'/' -f1 | awk -F'.' '{print $1"."$2"."$3}')
-    
-    # Find the highest 4th octet currently in use
-    local LAST_OCTET
-    LAST_OCTET=$(grep "AllowedIPs" "$wg_conf" | awk -F'= ' '{print $2}' | cut -d'/' -f1 | awk -F'.' '{print $4}' | sort -n | tail -n 1)
-    
-    local NEXT_OCTET=$((LAST_OCTET + 1))
-    if [[ "$NEXT_OCTET" -ge 254 ]]; then
-        log "ERROR" "Subnet exhausted. No more IPs available."
-        exit 1
-    fi
-    local CLIENT_VPN_IP="${SUBNET_BASE}.${NEXT_OCTET}"
+        # 5. IP Calculation
+        SUBNET_BASE=$(grep "Address" "$wg_conf" | head -n 1 | awk -F'= ' '{print $2}' | cut -d'/' -f1 | awk -F'.' '{print $1"."$2"."$3}')
+        LAST_OCTET=$(grep "AllowedIPs" "$wg_conf" | awk -F'= ' '{print $2}' | cut -d'/' -f1 | awk -F'.' '{print $4}' | sort -n | tail -n 1)
+        
+        NEXT_OCTET=$((LAST_OCTET + 1))
+        if [[ "$NEXT_OCTET" -ge 254 ]]; then
+            log "ERROR" "Subnet exhausted. No more IPs available."
+            exit 1
+        fi
+        CLIENT_VPN_IP="${SUBNET_BASE}.${NEXT_OCTET}"
 
-    # 6. Append to Server Config
-    log "INFO" "Registering $client_name with IP $CLIENT_VPN_IP..."
-    cat <<EOF >> "$wg_conf"
+        # 6. Append to Server Config
+        log "INFO" "Registering $client_name with IP $CLIENT_VPN_IP..."
+        echo -e "\n# Client: $client_name\n[Peer]\nPublicKey = $CLIENT_PUB\nPresharedKey = $PRESHARED_KEY\nAllowedIPs = ${CLIENT_VPN_IP}/32" >> "$wg_conf"
 
-# Client: $client_name
-[Peer]
-PublicKey = $CLIENT_PUB
-PresharedKey = $PRESHARED_KEY
-AllowedIPs = ${CLIENT_VPN_IP}/32
-EOF
-
-    # 7. Create Client Config
-    cat <<EOF > "$client_conf"
+        # 7. Create Client Config
+        cat <<EOF > "$client_conf"
 [Interface]
 PrivateKey = $CLIENT_PRIV
 Address = ${CLIENT_VPN_IP}/24
@@ -2765,6 +2754,8 @@ Endpoint = $ENDPOINT
 AllowedIPs = 0.0.0.0/0, ::/0
 PersistentKeepalive = 25
 EOF
+    )
+    # -----------------------------------------------------------
     chmod 600 "$client_conf"
 
     # 8. Hot-Reload WireGuard Interface
@@ -3130,7 +3121,7 @@ EOF
 # SYSWARDEN V9.40 - UI DASHBOARD GENERATION (EXPANDED REGISTRY)
 # ==============================================================================
 function generate_dashboard() {
-    log "INFO" "Generating the Serverless Dashboard UI (Expanded v9.51)..."
+    log "INFO" "Generating the Serverless Dashboard UI (Expanded v9.52)..."
     
     local UI_DIR="/etc/syswarden/ui"
     mkdir -p "$UI_DIR"
@@ -3193,7 +3184,7 @@ function generate_dashboard() {
             <div class="flex justify-between h-16 items-center">
                 <div class="flex items-center gap-3">
                     <div class="w-3 h-3 bg-red-500 rounded-full animate-pulse shadow-[0_0_10px_rgba(239,68,68,0.7)]" id="status-indicator"></div>
-                    <h1 class="text-xl font-bold tracking-tight">SysWarden <span class="text-brand-500">v9.51</span></h1>
+                    <h1 class="text-xl font-bold tracking-tight">SysWarden <span class="text-brand-500">v9.52</span></h1>
                 </div>
                 
                 <div class="flex items-center gap-2 bg-gray-100 dark:bg-dark-900 p-1 rounded-lg border border-gray-200 dark:border-gray-700">
@@ -3502,7 +3493,6 @@ EOF
         systemctl enable --now syswarden-ui >/dev/null 2>&1
     else
         # Backend OpenRC (Alpine Linux)
-        # FIX: Removed quotes around EOF, used $UI_BIND_IP, and escaped \${name}
         cat << EOF > /etc/init.d/syswarden-ui
 #!/sbin/openrc-run
 
@@ -3511,6 +3501,9 @@ description="SysWarden Minimal Web UI"
 command="/usr/bin/python3"
 command_args="-m http.server 9999 --bind $UI_BIND_IP"
 command_background="yes"
+# --- SECURITY FIX: PRIVILEGE ESCALATION PREVENTION ---
+command_user="nobody:nobody"
+# -----------------------------------------------------
 directory="/etc/syswarden/ui"
 pidfile="/run/\${name}.pid"
 
@@ -3666,23 +3659,22 @@ check_upgrade() {
     local api_url="https://api.github.com/repos/duggytuxy/syswarden/releases/latest"
     local response
     
-    # Fetch API response quietly (Timeout 5s to avoid hanging)
     response=$(curl -sS --connect-timeout 5 "$api_url") || {
         log "ERROR" "Failed to connect to GitHub API."
         exit 1
     }
 
-    # STRICT MATCH: Extract download URL specifically for the Alpine script
     local download_url
     download_url=$(echo "$response" | grep -o '"browser_download_url": "[^"]*/install-syswarden-alpine\.sh"' | head -n 1 | cut -d'"' -f4)
+    
+    local hash_url
+    hash_url=$(echo "$response" | grep -o '"browser_download_url": "[^"]*/install-syswarden-alpine\.sh\.sha256"' | head -n 1 | cut -d'"' -f4)
 
-    # ARCHITECTURE ISOLATION: If the latest release doesn't contain the Alpine script
     if [[ -z "$download_url" ]]; then
         echo -e "${GREEN}No specific update found for the Alpine version in the latest release. You are up to date!${NC}"
         return
     fi
 
-    # Extract tag_name (e.g., "v9.22")
     local latest_version
     latest_version=$(echo "$response" | grep -o '"tag_name": "[^"]*"' | head -n 1 | cut -d'"' -f4)
 
@@ -3693,11 +3685,32 @@ check_upgrade() {
         echo -e "${GREEN}You are already using the latest version of SysWarden!${NC}"
     else
         echo -e "${YELLOW}A new Alpine version ($latest_version) is available!${NC}"
-        echo -e "To upgrade safely, please run the following commands:\n"
-        echo -e "  wget -qO install-syswarden-alpine.sh \"$download_url\""
-        echo -e "  chmod +x install-syswarden-alpine.sh"
-        echo -e "  ./install-syswarden-alpine.sh\n"
-        echo -e "Note: Running the updated script will cleanly overwrite old configurations if necessary."
+        
+        # --- SECURITY FIX: MITM PROTECTION & SECURE UPDATE ---
+        echo -e "${YELLOW}Downloading and verifying update securely...${NC}"
+        
+        wget --https-only --secure-protocol=TLSv1_2 --max-redirect=2 --no-hsts -qO "$TMP_DIR/install-syswarden-alpine.sh" "$download_url"
+        wget --https-only --secure-protocol=TLSv1_2 --max-redirect=2 --no-hsts -qO "$TMP_DIR/install-syswarden-alpine.sh.sha256" "$hash_url"
+        
+        cd "$TMP_DIR" || exit 1
+        
+        if ! sha256sum -c install-syswarden-alpine.sh.sha256 --status; then
+            echo -e "${RED}[ CRITICAL ALERT ]${NC}"
+            echo -e "${RED}The downloaded script failed cryptographic validation!${NC}"
+            echo -e "${RED}Possible causes: Man-In-The-Middle (MITM) attack, DNS poisoning, or incomplete download.${NC}"
+            echo -e "${RED}Update aborted to protect system integrity.${NC}"
+            rm -f "$TMP_DIR/install-syswarden-alpine.sh*"
+            exit 1
+        fi
+        
+        echo -e "${GREEN}Checksum validated successfully. Applying update...${NC}"
+        
+        mv "$TMP_DIR/install-syswarden-alpine.sh" "/root/install-syswarden-alpine.sh"
+        chmod 700 "/root/install-syswarden-alpine.sh"
+        
+        echo -e "${GREEN}Update secured and installed in /root/install-syswarden-alpine.sh${NC}"
+        echo -e "Please run ${YELLOW}./install-syswarden-alpine.sh update${NC} to apply the new orchestrator rules."
+        # -----------------------------------------------------
     fi
 }
 
@@ -3779,9 +3792,13 @@ show_alerts_dashboard() {
 MODE="${1:-install}"
 
 # --- HEADLESS / UNATTENDED INSTALLATION PARSER ---
-# Safely parses a provided .conf file to inject environment variables
 if [[ -f "${1:-}" ]]; then
     echo -e "${GREEN}>>> Unattended configuration file detected: $1${NC}"
+    
+    # --- SECURITY FIX: SECURE AUTO-CONF FILE ---
+    chmod 600 "$1"
+    # -------------------------------------------
+
     while IFS='=' read -r key val; do
         # Ignore comments and empty lines
         [[ "$key" =~ ^[[:space:]]*# ]] && continue
