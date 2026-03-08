@@ -33,7 +33,7 @@ LOG_FILE="/var/log/syswarden-install.log"
 CONF_FILE="/etc/syswarden.conf"
 SET_NAME="syswarden_blacklist"
 TMP_DIR=$(mktemp -d)
-VERSION="v9.52"
+VERSION="v9.53"
 SYSWARDEN_DIR="/etc/syswarden"
 WHITELIST_FILE="$SYSWARDEN_DIR/whitelist.txt"
 BLOCKLIST_FILE="$SYSWARDEN_DIR/blocklist.txt"
@@ -357,14 +357,14 @@ auto_whitelist_admin() {
     
     local admin_ip=""
     
-    # 1. Standard SSH env variables
-    if [[ -n "${SSH_CLIENT:-}" ]]; then admin_ip=$(echo "$SSH_CLIENT" | awk '{print $1}')
-    elif [[ -n "${SSH_CONNECTION:-}" ]]; then admin_ip=$(echo "$SSH_CONNECTION" | awk '{print $1}')
+    # 1. Standard SSH env variables (Added || true to prevent pipefail crashes)
+    if [[ -n "${SSH_CLIENT:-}" ]]; then admin_ip=$(echo "$SSH_CLIENT" | awk '{print $1}' || true)
+    elif [[ -n "${SSH_CONNECTION:-}" ]]; then admin_ip=$(echo "$SSH_CONNECTION" | awk '{print $1}' || true)
     fi
     
-    # 2. Sudo/Su fallback using 'who am i'
+    # 2. Sudo/Su fallback using 'who am i' (Added || true to absorb exit 1 on Alpine)
     if [[ -z "$admin_ip" || ! "$admin_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        admin_ip=$(who am i 2>/dev/null | awk '{print $NF}' | tr -d '()')
+        admin_ip=$(who am i 2>/dev/null | awk '{print $NF}' | tr -d '()' || true)
     fi
     
     # 3. Process the IP
@@ -374,7 +374,7 @@ auto_whitelist_admin() {
             echo "$admin_ip" >> "$WHITELIST_FILE"
         fi
     else
-        log "WARN" "Could not auto-detect admin SSH IP. (Expected if run from local console)"
+        log "WARN" "Could not auto-detect admin SSH IP. (Expected if run from local console or su -)"
     fi
 }
 
@@ -3746,7 +3746,7 @@ EOF
 # SYSWARDEN V9.40 - UI DASHBOARD GENERATION (EXPANDED REGISTRY)
 # ==============================================================================
 function generate_dashboard() {
-    log "INFO" "Generating the Serverless Dashboard UI (Expanded v9.52)..."
+    log "INFO" "Generating the Serverless Dashboard UI (Expanded v9.53)..."
     
     local UI_DIR="/etc/syswarden/ui"
     mkdir -p "$UI_DIR"
@@ -3809,7 +3809,7 @@ function generate_dashboard() {
             <div class="flex justify-between h-16 items-center">
                 <div class="flex items-center gap-3">
                     <div class="w-3 h-3 bg-red-500 rounded-full animate-pulse shadow-[0_0_10px_rgba(239,68,68,0.7)]" id="status-indicator"></div>
-                    <h1 class="text-xl font-bold tracking-tight">SysWarden <span class="text-brand-500">v9.52</span></h1>
+                    <h1 class="text-xl font-bold tracking-tight">SysWarden <span class="text-brand-500">v9.53</span></h1>
                 </div>
                 
                 <div class="flex items-center gap-2 bg-gray-100 dark:bg-dark-900 p-1 rounded-lg border border-gray-200 dark:border-gray-700">
@@ -4579,7 +4579,7 @@ fi
 if [[ "$MODE" != "update" ]]; then
     clear
     echo -e "${GREEN}#############################################################"
-    echo -e "#     SysWarden Tool Installer (Universal v9.52)     #"
+    echo -e "#     SysWarden Tool Installer (Universal v9.53)     #"
     echo -e "#############################################################${NC}"
 fi
 
