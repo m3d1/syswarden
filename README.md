@@ -225,7 +225,7 @@ Paste the following configuration into the file (exemple:)
 
 ```
 # ==============================================================================
-# Version=9.30
+# Version=v9.52
 # SYSWARDEN UNATTENDED INSTALLATION CONFIGURATION
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -271,14 +271,14 @@ SYSWARDEN_CUSTOM_URL=""
 # y = Enable, n = Disable
 SYSWARDEN_ENABLE_GEO="n"
 # Space-separated country codes (e.g., "ru cn kp ir")
-SYSWARDEN_GEO_CODES="ru cn kp ir"
+SYSWARDEN_GEO_CODES="ru cn kp ir br vn in by ng bd pe mx ua my ph lt id af al bd by bo cl hr ec hk il kz lb my md pk ph qa sa sd tm uz zm zw ye"
 
 # --- ASN Blocking ---
 # Enable the ASN blocking module
 SYSWARDEN_ENABLE_ASN="y"
 
 # Master List (VPNs, Proxies, Linode, Tor Exit Nodes/Bulletproof Hosters)
-SYSWARDEN_ASN_LIST="AS60068 AS30823 AS210644 AS200593 AS202425 AS215540 AS53667 AS9009 AS20473 AS60068 AS212238 AS16276 AS62282 AS14061 AS24940 AS398324 AS31173 AS11878 AS32097 AS43948 AS63949 AS62240 AS16265 AS3223 AS53667 AS200651 AS58224 AS57821 AS199524 AS51852 AS197540"
+SYSWARDEN_ASN_LIST="AS30823 AS210644 AS200593 AS202425 AS215540 AS9009 AS20473 AS60068 AS212238 AS16276 AS62282 AS14061 AS24940 AS398324 AS31173 AS11878 AS32097 AS43948 AS62240 AS16265 AS3223 AS53667 AS200651 AS58224 AS57821 AS199524 AS51852 AS197540"
 
 # Include Spamhaus ASN-DROP list for known cybercriminal infrastructures
 SYSWARDEN_USE_SPAMHAUS="y"
