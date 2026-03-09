@@ -33,7 +33,7 @@ LOG_FILE="/var/log/syswarden-install.log"
 CONF_FILE="/etc/syswarden.conf"
 SET_NAME="syswarden_blacklist"
 TMP_DIR=$(mktemp -d)
-VERSION="v9.62"
+VERSION="v9.63"
 SYSWARDEN_DIR="/etc/syswarden"
 WHITELIST_FILE="$SYSWARDEN_DIR/whitelist.txt"
 BLOCKLIST_FILE="$SYSWARDEN_DIR/blocklist.txt"
@@ -3223,48 +3223,74 @@ def monitor_logs():
                     except ValueError:
                         port = 0
                     
+                    # Base: Scanning for open ports and vulnerable services (Cat 14)
                     cats = ["14"]
-                    attack_type = "Port Scan"
+                    attack_type = "Port Scan / Probing"
 
-                    if port in [80, 443, 4443, 8080, 8443]: cats.extend(["20", "21"]); attack_type = "Web Attack"
+                    if port in [80, 443, 4443, 8080, 8443]: cats.extend(["15", "21"]); attack_type = "Web Attack"
                     elif port in [22, 2222, 22222]: cats.extend(["18", "22"]); attack_type = "SSH Attack"
                     elif port == 23: cats.extend(["18", "23"]); attack_type = "Telnet IoT Attack"
-                    elif port == 88: cats.extend(["15", "20"]); attack_type = "Kerberos Attack"
+                    elif port == 88: cats.extend(["15", "18"]); attack_type = "Kerberos Attack"
                     elif port in [139, 445]: cats.extend(["15", "18"]); attack_type = "SMB/Possible Ransomware Attack"
-                    elif port in [389, 636]: cats.extend(["15", "20"]); attack_type = "LDAP/LDAPS Attack"
-                    elif port == 1433: cats.extend(["18", "15"]); attack_type = "MSSQL Attack"
-                    elif port == 8006: cats.extend(["18", "21"]); attack_type = "Proxmox VE Brute-Force"
-                    elif port == 3000: cats.extend(["15", "20"]); attack_type = "Possible Vulns Exploit"
+                    elif port in [389, 636]: cats.extend(["15", "18"]); attack_type = "LDAP/LDAPS Attack"
+                    elif port in [1433, 3306, 5432, 27017, 6379, 9200, 11211]: cats.extend(["15", "18"]); attack_type = "Database/Cache Attack"
+                    elif port in [8006, 9090, 3000, 2375, 2376]: cats.extend(["15", "21"]); attack_type = "Infra/DevOps Attack"
                     elif port == 4444: cats.extend(["15", "20"]); attack_type = "Possible C2 Host"
                     elif port in [3389, 5900]: cats.extend(["18"]); attack_type = "RDP/VNC Attack"
                     elif port == 21: cats.extend(["5", "18"]); attack_type = "FTP Attack"
-                    elif port in [25, 110, 143, 465, 587, 993, 995]: cats.extend(["18"]); attack_type = "Mail Service Attack"
+                    elif port in [25, 110, 143, 465, 587, 993, 995]: cats.extend(["11", "18"]); attack_type = "Mail Service Attack"
                     elif port in [1080, 3128, 8118]: cats.extend(["9", "15"]); attack_type = "Open Proxy Probe"
-                    elif port in [2375, 2376]: cats.extend(["15", "20"]); attack_type = "Docker API Attack"
-                    elif port in [3306, 5432, 27017]: cats.extend(["15", "18"]); attack_type = "DB Attack (MySQL/PgSQL/Mongo)"
                     elif port in [5060, 5061]: cats.extend(["8", "18"]); attack_type = "SIP/VoIP Attack"
-                    elif port in [6379, 9200, 11211]: cats.extend(["15", "20"]); attack_type = "NoSQL/Cache Attack"
-                    elif port == 1194: cats.extend(["15", "18"]); attack_type = "OpenVPN Attack"
-                    elif port in [51820, 51821]: cats.extend(["15", "18"]); attack_type = "WireGuard Attack"
-                    elif port == 9090: cats.extend(["18", "21"]); attack_type = "Cockpit Web Console Attack"
+                    elif port in [1194, 51820, 51821]: cats.extend(["15", "18"]); attack_type = "VPN Probe"
 
+                    cats = list(set(cats)) # Deduplicate array before sending
                     threading.Thread(target=send_report, args=(ip, ",".join(cats), f"Blocked by SysWarden Firewall ({attack_type} Port {port})")).start()
                     continue
 
-            # --- FAIL2BAN LOGIC ---
+            # --- FAIL2BAN LOGIC (Layer 7) ---
             if ENABLE_F2B:
                 match_f2b = regex_f2b.search(line)
                 if match_f2b and "SysWarden-BLOCK" not in line:
-                    jail = match_f2b.group(1)
+                    jail = match_f2b.group(1).lower()
                     ip = match_f2b.group(2)
                     
-                    cats = ["18"] # General Abuse
-                    if "ssh" in jail.lower(): cats.extend(["22"])
-                    elif "nginx" in jail.lower() or "apache" in jail.lower() or "wordpress" in jail.lower(): cats.extend(["21"])
-                    elif "postfix" in jail.lower() or "sendmail" in jail.lower(): cats.extend(["5", "11"])
-                    elif "mariadb" in jail.lower() or "mongodb" in jail.lower(): cats.extend(["15"])
+                    cats = []
+                    
+                    # 1. Web Vulnerability Scanners & Pentest Tools
+                    if any(x in jail for x in ["badbot", "scanner", "apimapper", "secretshunter"]): cats.extend(["14", "15", "19", "21"])
+                    # 2. SQLi & XSS
+                    elif "sqli" in jail or "xss" in jail: cats.extend(["15", "16", "21"])
+                    # 3. RCE, WebShells, LFI/RFI, SSRF, JNDI
+                    elif any(x in jail for x in ["revshell", "webshell", "lfi", "ssrf", "jndi"]): cats.extend(["15", "21"])
+                    # 4. Layer 7 DDoS (HTTP Flood)
+                    elif "httpflood" in jail: cats.extend(["4", "21"])
+                    # 5. AI Bots & Scrapers
+                    elif "aibot" in jail: cats.extend(["19", "21"])
+                    # 6. Proxy Abuse / Tunneling
+                    elif any(x in jail for x in ["proxy-abuse", "squid", "haproxy"]): cats.extend(["9", "15", "21"])
+                    # 7. SSH Brute-Force
+                    elif "ssh" in jail: cats.extend(["18", "22"])
+                    # 8. FTP Brute-Force
+                    elif "vsftpd" in jail or "ftp" in jail: cats.extend(["5", "18"])
+                    # 9. Mail Service Abuse
+                    elif any(x in jail for x in ["postfix", "sendmail", "dovecot"]): cats.extend(["11", "18"])
+                    # 10. Database & Middleware Brute-Force
+                    elif any(x in jail for x in ["mariadb", "mongodb", "redis", "rabbitmq"]): cats.extend(["15", "18"])
+                    # 11. Privilege Escalation & Auditd
+                    elif any(x in jail for x in ["privesc", "auditd", "proxmox"]): cats.extend(["15", "18"])
+                    # 12. Web App Logins (Auth/CMS/SSO)
+                    elif any(x in jail for x in ["auth", "wordpress", "drupal", "nextcloud", "phpmyadmin", "laravel", "grafana", "zabbix", "gitea", "cockpit", "vaultwarden", "sso"]): cats.extend(["18", "21"])
+                    # 13. VPN 
+                    elif "wireguard" in jail or "openvpn" in jail: cats.extend(["15", "18"])
+                    # 14. VoIP
+                    elif "asterisk" in jail: cats.extend(["8", "18"])
+                    # 15. Portscan
+                    elif "portscan" in jail: cats.extend(["14"])
+                    # 16. Fallback
+                    else: cats.extend(["15", "18"])
 
-                    threading.Thread(target=send_report, args=(ip, ",".join(cats), f"Banned by Fail2ban (Jail: {jail})")).start()
+                    cats = list(set(cats)) # Deduplicate array before sending
+                    threading.Thread(target=send_report, args=(ip, ",".join(cats), f"Banned by Fail2ban (Jail: {match_f2b.group(1)})")).start()
 
 if __name__ == "__main__":
     monitor_logs()
@@ -3874,7 +3900,7 @@ EOF
 # SYSWARDEN v9.40 - UI DASHBOARD GENERATION (EXPANDED REGISTRY)
 # ==============================================================================
 function generate_dashboard() {
-    log "INFO" "Generating the Serverless Dashboard UI (Expanded v9.62)..."
+    log "INFO" "Generating the Serverless Dashboard UI (Expanded v9.63)..."
     
     local UI_DIR="/etc/syswarden/ui"
     mkdir -p "$UI_DIR"
@@ -3937,7 +3963,7 @@ function generate_dashboard() {
             <div class="flex justify-between h-16 items-center">
                 <div class="flex items-center gap-3">
                     <div class="w-3 h-3 bg-red-500 rounded-full animate-pulse shadow-[0_0_10px_rgba(239,68,68,0.7)]" id="status-indicator"></div>
-                    <h1 class="text-xl font-bold tracking-tight">SysWarden <span class="text-brand-500">v9.62</span></h1>
+                    <h1 class="text-xl font-bold tracking-tight">SysWarden <span class="text-brand-500">v9.63</span></h1>
                 </div>
                 
                 <div class="flex items-center gap-2 bg-gray-100 dark:bg-dark-900 p-1 rounded-lg border border-gray-200 dark:border-gray-700">
@@ -4762,7 +4788,7 @@ fi
 if [[ "$MODE" != "update" ]]; then
     clear
     echo -e "${GREEN}#############################################################"
-    echo -e "#     SysWarden Tool Installer (Universal v9.62)     #"
+    echo -e "#     SysWarden Tool Installer (Universal v9.63)     #"
     echo -e "#############################################################${NC}"
 fi
 
