@@ -33,7 +33,7 @@ LOG_FILE="/var/log/syswarden-install.log"
 CONF_FILE="/etc/syswarden.conf"
 SET_NAME="syswarden_blacklist"
 TMP_DIR=$(mktemp -d)
-VERSION="v9.63"
+VERSION="v9.64"
 SYSWARDEN_DIR="/etc/syswarden"
 WHITELIST_FILE="$SYSWARDEN_DIR/whitelist.txt"
 BLOCKLIST_FILE="$SYSWARDEN_DIR/blocklist.txt"
@@ -1022,7 +1022,7 @@ EOF
 <?xml version="1.0" encoding="utf-8"?>
 <ipset type="hash:net">
   <option name="family" value="inet"/>
-  <option name="maxelem" value="200000"/>
+  <option name="maxelem" value="1000000"/>
 </ipset>
 EOF
 
@@ -1031,7 +1031,7 @@ EOF
 <?xml version="1.0" encoding="utf-8"?>
 <ipset type="hash:net">
   <option name="family" value="inet"/>
-  <option name="maxelem" value="500000"/>
+  <option name="maxelem" value="1000000"/>
 </ipset>
 EOF
         fi
@@ -1041,7 +1041,7 @@ EOF
 <?xml version="1.0" encoding="utf-8"?>
 <ipset type="hash:net">
   <option name="family" value="inet"/>
-  <option name="maxelem" value="500000"/>
+  <option name="maxelem" value="1000000"/>
 </ipset>
 EOF
         fi
@@ -1102,7 +1102,7 @@ EOF
         log "INFO" "Configuring UFW with IPSet..."
         
         # 1. Create IPSet (UFW uses iptables underneath)
-        ipset create "$SET_NAME" hash:net maxelem 200000 -exist
+        ipset create "$SET_NAME" hash:net maxelem 1000000 -exist
         sed "s/^/add $SET_NAME /" "$FINAL_LIST" | ipset restore -!
 
         # 2. Inject Rule into /etc/ufw/before.rules
@@ -1124,7 +1124,7 @@ EOF
         # --- GEOIP INJECTION ---
         if [[ "${GEOBLOCK_COUNTRIES:-none}" != "none" ]] && [[ -s "$GEOIP_FILE" ]]; then
             log "INFO" "Configuring UFW GeoIP Set..."
-            ipset create "$GEOIP_SET_NAME" hash:net maxelem 500000 -exist
+            ipset create "$GEOIP_SET_NAME" hash:net maxelem 1000000 -exist
             sed "s/^/add $GEOIP_SET_NAME /" "$GEOIP_FILE" | ipset restore -!
             
             sed -i "/$GEOIP_SET_NAME/d" "$UFW_RULES"
@@ -1140,7 +1140,7 @@ EOF
         # --- ASN INJECTION ---
         if [[ "${BLOCK_ASNS:-none}" != "none" ]] && [[ -s "$ASN_FILE" ]]; then
             log "INFO" "Configuring UFW ASN Set..."
-            ipset create "$ASN_SET_NAME" hash:net maxelem 500000 -exist
+            ipset create "$ASN_SET_NAME" hash:net maxelem 1000000 -exist
             sed "s/^/add $ASN_SET_NAME /" "$ASN_FILE" | ipset restore -!
             
             sed -i "/$ASN_SET_NAME/d" "$UFW_RULES"
@@ -1182,9 +1182,9 @@ EOF
 
     else
         # Fallback IPSET / IPTABLES
-        ipset create "${SET_NAME}_tmp" hash:net maxelem 200000 -exist
+        ipset create "${SET_NAME}_tmp" hash:net maxelem 1000000 -exist
         sed "s/^/add ${SET_NAME}_tmp /" "$FINAL_LIST" | ipset restore -!
-        ipset create "$SET_NAME" hash:net maxelem 200000 -exist
+        ipset create "$SET_NAME" hash:net maxelem 1000000 -exist
         ipset swap "${SET_NAME}_tmp" "$SET_NAME"
         ipset destroy "${SET_NAME}_tmp"
         
@@ -1200,9 +1200,9 @@ EOF
 
         # --- ASN INJECTION (Priority 2) ---
         if [[ "${BLOCK_ASNS:-none}" != "none" ]] && [[ -s "$ASN_FILE" ]]; then
-            ipset create "${ASN_SET_NAME}_tmp" hash:net maxelem 500000 -exist
+            ipset create "${ASN_SET_NAME}_tmp" hash:net maxelem 1000000 -exist
             sed "s/^/add ${ASN_SET_NAME}_tmp /" "$ASN_FILE" | ipset restore -!
-            ipset create "$ASN_SET_NAME" hash:net maxelem 500000 -exist
+            ipset create "$ASN_SET_NAME" hash:net maxelem 1000000 -exist
             ipset swap "${ASN_SET_NAME}_tmp" "$ASN_SET_NAME"
             ipset destroy "${ASN_SET_NAME}_tmp"
             
@@ -1215,10 +1215,10 @@ EOF
 
         # --- GEOIP INJECTION (Priority 1) ---
         if [[ "${GEOBLOCK_COUNTRIES:-none}" != "none" ]] && [[ -s "$GEOIP_FILE" ]]; then
-            ipset create "${GEOIP_SET_NAME}_tmp" hash:net maxelem 500000 -exist
+            ipset create "${GEOIP_SET_NAME}_tmp" hash:net maxelem 1000000 -exist
             # The -! flag is crucial to prevent ipset from crashing if two countries share the same CIDR
             sed "s/^/add ${GEOIP_SET_NAME}_tmp /" "$GEOIP_FILE" | ipset restore -!
-            ipset create "$GEOIP_SET_NAME" hash:net maxelem 500000 -exist
+            ipset create "$GEOIP_SET_NAME" hash:net maxelem 1000000 -exist
             ipset swap "${GEOIP_SET_NAME}_tmp" "$GEOIP_SET_NAME"
             ipset destroy "${GEOIP_SET_NAME}_tmp"
             
@@ -1271,14 +1271,14 @@ EOF
         
         # 1. Standard Blocklist
         if ! ipset list "$SET_NAME" >/dev/null 2>&1; then
-             ipset create "$SET_NAME" hash:net maxelem 200000 -exist
+             ipset create "$SET_NAME" hash:net maxelem 1000000 -exist
              sed "s/^/add $SET_NAME /" "$FINAL_LIST" | ipset restore -!
         fi
 
         # 2. Geo-Blocking Set
         if [[ "${GEOBLOCK_COUNTRIES:-none}" != "none" ]] && [[ -s "$GEOIP_FILE" ]]; then
             if ! ipset list "$GEOIP_SET_NAME" >/dev/null 2>&1; then
-                 ipset create "$GEOIP_SET_NAME" hash:net maxelem 500000 -exist
+                 ipset create "$GEOIP_SET_NAME" hash:net maxelem 1000000 -exist
                  sed "s/^/add $GEOIP_SET_NAME /" "$GEOIP_FILE" | ipset restore -!
             fi
         fi
@@ -1286,7 +1286,7 @@ EOF
         # 3. ASN-Blocking Set
         if [[ "${BLOCK_ASNS:-none}" != "none" ]] && [[ -s "$ASN_FILE" ]]; then
             if ! ipset list "$ASN_SET_NAME" >/dev/null 2>&1; then
-                 ipset create "$ASN_SET_NAME" hash:net maxelem 500000 -exist
+                 ipset create "$ASN_SET_NAME" hash:net maxelem 1000000 -exist
                  sed "s/^/add $ASN_SET_NAME /" "$ASN_FILE" | ipset restore -!
             fi
         fi
@@ -2272,6 +2272,9 @@ EOF
 
             if [[ ! -f "/etc/fail2ban/filter.d/syswarden-portscan.conf" ]]; then
                 cat <<'EOF' > /etc/fail2ban/filter.d/syswarden-portscan.conf
+[INCLUDES]
+before = common.conf
+
 [Definition]
 # FIX: Strict anchor ^%(__prefix_line)s prevents Log Injection from users.
 failregex = ^%(__prefix_line)s(?:kernel: |\[[0-9. ]+\] ).*\[SysWarden-BLOCK\].*SRC=<HOST> .*$
@@ -3900,7 +3903,7 @@ EOF
 # SYSWARDEN v9.40 - UI DASHBOARD GENERATION (EXPANDED REGISTRY)
 # ==============================================================================
 function generate_dashboard() {
-    log "INFO" "Generating the Serverless Dashboard UI (Expanded v9.63)..."
+    log "INFO" "Generating the Serverless Dashboard UI (Expanded v9.64)..."
     
     local UI_DIR="/etc/syswarden/ui"
     mkdir -p "$UI_DIR"
@@ -3963,7 +3966,7 @@ function generate_dashboard() {
             <div class="flex justify-between h-16 items-center">
                 <div class="flex items-center gap-3">
                     <div class="w-3 h-3 bg-red-500 rounded-full animate-pulse shadow-[0_0_10px_rgba(239,68,68,0.7)]" id="status-indicator"></div>
-                    <h1 class="text-xl font-bold tracking-tight">SysWarden <span class="text-brand-500">v9.63</span></h1>
+                    <h1 class="text-xl font-bold tracking-tight">SysWarden <span class="text-brand-500">v9.64</span></h1>
                 </div>
                 
                 <div class="flex items-center gap-2 bg-gray-100 dark:bg-dark-900 p-1 rounded-lg border border-gray-200 dark:border-gray-700">
@@ -4788,7 +4791,7 @@ fi
 if [[ "$MODE" != "update" ]]; then
     clear
     echo -e "${GREEN}#############################################################"
-    echo -e "#     SysWarden Tool Installer (Universal v9.63)     #"
+    echo -e "#     SysWarden Tool Installer (Universal v9.64)     #"
     echo -e "#############################################################${NC}"
 fi
 

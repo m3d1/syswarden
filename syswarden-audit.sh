@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# SysWarden v9.63 - Audit Tool
+# SysWarden v9.64 - Audit Tool
 # Copyright (C) 2026 duggytuxy - Laurent M.
 #
 # This program is free software: you can redistribute it and/or modify
@@ -50,17 +50,18 @@ log_header() {
 pass() { 
     echo -e "  [${GREEN}PASS${NC}] $1"
     echo "$(date -u +"%Y-%m-%dT%H:%M:%SZ") [PASS] $1" >> "$AUDIT_LOG"
-    ((SCORE++)); ((TOTAL++))
+    SCORE=$((SCORE + 1))
+    TOTAL=$((TOTAL + 1))
 }
 fail() { 
     echo -e "  [${RED}FAIL${NC}] $1"
     echo "$(date -u +"%Y-%m-%dT%H:%M:%SZ") [FAIL] $1" >> "$AUDIT_LOG"
-    ((TOTAL++))
+    TOTAL=$((TOTAL + 1))
 }
 warn() { 
     echo -e "  [${YELLOW}WARN${NC}] $1"
     echo "$(date -u +"%Y-%m-%dT%H:%M:%SZ") [WARN] $1" >> "$AUDIT_LOG"
-    ((TOTAL++))
+    TOTAL=$((TOTAL + 1))
 }
 info() { 
     echo -e "  [${BLUE}INFO${NC}] $1"
