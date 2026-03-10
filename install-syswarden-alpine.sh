@@ -42,7 +42,7 @@ LOG_FILE="/var/log/syswarden-install.log"
 CONF_FILE="/etc/syswarden.conf"
 SET_NAME="syswarden_blacklist"
 TMP_DIR=$(mktemp -d)
-VERSION="v9.65"
+VERSION="v9.66"
 SYSWARDEN_DIR="/etc/syswarden"
 WHITELIST_FILE="$SYSWARDEN_DIR/whitelist.txt"
 BLOCKLIST_FILE="$SYSWARDEN_DIR/blocklist.txt"
@@ -103,12 +103,11 @@ detect_os_backend() {
         exit 1
     fi
 
-    # Logic to select the best firewall for Alpine
-    if command -v nft >/dev/null 2>&1 || apk info -e nftables >/dev/null 2>&1; then
-        FIREWALL_BACKEND="nftables"
-    else
-        FIREWALL_BACKEND="ipset" # Fallback Iptables
-    fi
+    # --- FIX: THE EGG & CHICKEN PARADOX ---
+    # On a fresh install, 'nft' is not installed yet, causing a fallback to 'ipset'.
+    # Since Alpine kernels often lack 'ip_set' modules by default, rules fail to load.
+    # We now FORCE Nftables as the absolute native standard for Alpine 3+.
+    FIREWALL_BACKEND="nftables"
 
     log "INFO" "OS: $OS"
     log "INFO" "Detected Firewall Backend: $FIREWALL_BACKEND"
@@ -176,11 +175,16 @@ install_dependencies() {
     chmod 600 /etc/cron.allow
     rm -f /etc/cron.deny
     
-    # 2. Purge non-root users from the 'wheel' group (Prevents sudo escalation)
-    for user in $(awk -F':' '/^wheel:/ {print $4}' /etc/group | tr ',' ' '); do
-        if [[ -n "$user" ]] && [[ "$user" != "root" ]]; then
-            gpasswd -d "$user" wheel >/dev/null 2>&1 || true
-            log "INFO" "Removed user '$user' from wheel group to prevent privilege escalation."
+    # 2. Purge non-root users from privileged groups (wheel/adm/sudo)
+    # FIX: Alpine natively places 'daemon' in the 'adm' group, triggering the audit fail.
+    for grp in wheel adm sudo; do
+        if grep -q "^${grp}:" /etc/group 2>/dev/null; then
+            for user in $(awk -F':' -v g="$grp" '$1==g {print $4}' /etc/group | tr ',' ' ' 2>/dev/null); do
+                if [[ -n "$user" ]] && [[ "$user" != "root" ]]; then
+                    delgroup "$user" "$grp" >/dev/null 2>&1 || true
+                    log "INFO" "Removed user '$user' from '$grp' group to prevent privilege escalation."
+                fi
+            done
         fi
     done
     
@@ -1005,10 +1009,6 @@ configure_fail2ban() {
 logtarget = /var/log/fail2ban.log
 EOF
 
-        # 2. Dynamic Action based on Firewall Backend
-        local f2b_action="iptables-multiport"
-        if [[ "$FIREWALL_BACKEND" == "nftables" ]]; then f2b_action="nftables-multiport"; fi
-
         # --- FIX: DYNAMIC FAIL2BAN INFRASTRUCTURE WHITELIST (ANTI SELF-DOS) ---
         local f2b_ignoreip="127.0.0.1/8 ::1"
         
@@ -1017,14 +1017,19 @@ EOF
         public_ip=$(ip -4 addr show | grep -oEo 'inet [0-9.]+' | awk '{print $2}' | grep -v '127.0.0.1' | head -n 1 || true)
         if [[ -n "$public_ip" ]]; then f2b_ignoreip="$f2b_ignoreip $public_ip"; fi
         
-        # 2. Dynamically extract active DNS resolvers (Prevents Linode/AWS DNS DoS)
+        # 2. Dynamically extract active direct subnets (Lab & VPC Network protection)
+        local local_subnets
+        local_subnets=$(ip -4 route | grep -v default | awk '{print $1}' | tr '\n' ' ' || true)
+        if [[ -n "$local_subnets" ]]; then f2b_ignoreip="$f2b_ignoreip $local_subnets"; fi
+        
+        # 3. Dynamically extract active DNS resolvers
         local dns_ips
         if [[ -f /etc/resolv.conf ]]; then
             dns_ips=$(grep '^nameserver' /etc/resolv.conf | awk '{print $2}' | grep -Eo '^[0-9.]+' | tr '\n' ' ' || true)
             if [[ -n "$dns_ips" ]]; then f2b_ignoreip="$f2b_ignoreip $dns_ips"; fi
         fi
 
-        # 3. Add Custom Whitelist entries
+        # 4. Add Custom Whitelist entries
         if [[ -s "$WHITELIST_FILE" ]]; then
             local wl_ips
             wl_ips=$(grep -vE '^\s*#|^\s*$' "$WHITELIST_FILE" | tr '\n' ' ' || true)
@@ -3259,7 +3264,7 @@ EOF
 # SYSWARDEN V9.40 - UI DASHBOARD GENERATION (EXPANDED REGISTRY)
 # ==============================================================================
 function generate_dashboard() {
-    log "INFO" "Generating the Serverless Dashboard UI (Expanded v9.65)..."
+    log "INFO" "Generating the Serverless Dashboard UI (Expanded v9.66)..."
     
     local UI_DIR="/etc/syswarden/ui"
     mkdir -p "$UI_DIR"
@@ -3322,7 +3327,7 @@ function generate_dashboard() {
             <div class="flex justify-between h-16 items-center">
                 <div class="flex items-center gap-3">
                     <div class="w-3 h-3 bg-red-500 rounded-full animate-pulse shadow-[0_0_10px_rgba(239,68,68,0.7)]" id="status-indicator"></div>
-                    <h1 class="text-xl font-bold tracking-tight">SysWarden <span class="text-brand-500">v9.65</span></h1>
+                    <h1 class="text-xl font-bold tracking-tight">SysWarden <span class="text-brand-500">v9.66</span></h1>
                 </div>
                 
                 <div class="flex items-center gap-2 bg-gray-100 dark:bg-dark-900 p-1 rounded-lg border border-gray-200 dark:border-gray-700">
