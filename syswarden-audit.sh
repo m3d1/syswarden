@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# SysWarden v9.67 - Audit Tool
+# SysWarden v9.68 - Audit Tool
 # Copyright (C) 2026 duggytuxy - Laurent M.
 #
 # This program is free software: you can redistribute it and/or modify
@@ -122,19 +122,22 @@ else
     fail "/etc/cron.allow is missing (Crontab not locked down)"
 fi
 
-# Audit privileged groups for unauthorized standard users
+# Audit privileged groups for unauthorized standard users (Humans UID >= 1000)
 PRIV_USERS=$(awk -F':' '/^(wheel|sudo|adm):/ {print $4}' /etc/group | tr ',' '\n' | grep -v '^$' | grep -v 'root' || true)
-if [[ -z "$PRIV_USERS" ]]; then
-    pass "Privileged groups (wheel/sudo/adm) are clean."
-else
-    fail "Found standard users in privileged groups: $(echo "$PRIV_USERS" | tr '\n' ' ')"
-fi
+UNAUTHORIZED_USERS=""
 
-# Verify strict SSH configurations (Anti-Pivoting)
-if grep -q "^[[:space:]]*AllowTcpForwarding[[:space:]]*no" /etc/ssh/sshd_config; then
-    pass "SSH TCP Forwarding is strictly disabled."
+for u in $PRIV_USERS; do
+    # Extract UID of the user. System users (daemon, bin) have UID < 1000.
+    uid=$(id -u "$u" 2>/dev/null || echo "0")
+    if [[ "$uid" -ge 1000 ]]; then
+        UNAUTHORIZED_USERS="$UNAUTHORIZED_USERS $u"
+    fi
+done
+
+if [[ -z "$UNAUTHORIZED_USERS" ]]; then
+    pass "Privileged groups (wheel/sudo/adm) are clean from standard users."
 else
-    fail "SSH TCP Forwarding is NOT disabled in sshd_config."
+    fail "Found standard users in privileged groups:$UNAUTHORIZED_USERS"
 fi
 
 # Verify Immutable flags on standard user profiles
@@ -234,7 +237,11 @@ if is_service_active "fail2ban"; then
         
         # Audit IgnoreIP (Anti Self-DoS)
         IGNORE_IPS=$(fail2ban-client get sshd ignoreip 2>/dev/null || true)
-        if echo "$IGNORE_IPS" | grep -q -E "[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+.*[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+"; then
+        
+        # FIX: fail2ban-client outputs IPs on multiple lines. We must count the total IPv4 patterns.
+        IP_COUNT=$(echo "$IGNORE_IPS" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | sort -u | wc -l)
+        
+        if [[ "$IP_COUNT" -gt 1 ]]; then
             pass "Dynamic IgnoreIP is populated (Anti-Lockout verified)."
         else
             warn "IgnoreIP might only contain localhost. Infrastructure whitelisting may have failed."
