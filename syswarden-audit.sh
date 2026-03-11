@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# SysWarden v9.76 - Audit Tool
+# SysWarden v9.77 - Audit Tool
 # Copyright (C) 2026 duggytuxy - Laurent M.
 #
 # This program is free software: you can redistribute it and/or modify
@@ -269,8 +269,10 @@ else
     fail "SysWarden UI Server is offline."
 fi
 
-# Verify telemetry payload permissions (Least Privilege)
-check_file_perms "/etc/syswarden/ui/data.json" "600" "nobody"
+# --- FIX: Verify telemetry payload permissions ---
+# Permissions relaxed to 644 (instead of 600) to allow the unprivileged 
+# Python web server (running as nobody) to read and serve the JSON data.
+check_file_perms "/etc/syswarden/ui/data.json" "644" "nobody"
 
 # AbuseIPDB Async Reporter (Optional Component)
 if [[ -f "/usr/local/bin/syswarden_reporter.py" ]]; then
