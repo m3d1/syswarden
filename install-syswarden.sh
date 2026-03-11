@@ -33,7 +33,7 @@ LOG_FILE="/var/log/syswarden-install.log"
 CONF_FILE="/etc/syswarden.conf"
 SET_NAME="syswarden_blacklist"
 TMP_DIR=$(mktemp -d)
-VERSION="v9.81"
+VERSION="v9.82"
 SYSWARDEN_DIR="/etc/syswarden"
 WHITELIST_FILE="$SYSWARDEN_DIR/whitelist.txt"
 BLOCKLIST_FILE="$SYSWARDEN_DIR/blocklist.txt"
@@ -1053,54 +1053,43 @@ EOF
         
         # --- WIREGUARD SSH CLOAKING & NATIVE NAT (FIXED FOR ALMA 10) ---
         if [[ "${USE_WIREGUARD:-n}" == "y" ]]; then
-            log "INFO" "WireGuard: Configuring Native Firewalld Routing and SSH Cloaking..."
+            log "INFO" "WireGuard: Configuring Native Firewalld Routing and Strict SSH Cloaking..."
             
             # 1. Native NAT for VPN Internet Access (Alma/RHEL/Fedora)
-            # Enables masquerading so VPN clients can access the internet via the host
             firewall-cmd --permanent --add-masquerade >/dev/null 2>&1 || true
-            
-            # Assign wg0 to the 'trusted' zone to allow all traffic internally
             firewall-cmd --permanent --zone=trusted --add-interface=wg0 >/dev/null 2>&1 || true
             
-            # 2. Universal SSH Port Removal (Purges SSH from ALL zones)
-            # Critical: Removes any lingering SSH rules from default zones (public, home, etc.)
+            # 2. Universal SSH Port Purge (Cleans lingering SSH rules from ALL zones)
             for zone in $(firewall-cmd --get-zones 2>/dev/null || echo "public"); do
                 firewall-cmd --permanent --zone="$zone" --remove-port="${SSH_PORT:-22}/tcp" >/dev/null 2>&1 || true
                 firewall-cmd --permanent --zone="$zone" --remove-service="ssh" >/dev/null 2>&1 || true
-                
                 # Explicitly remove any existing rich rules for SSH to prevent conflicts
                 firewall-cmd --permanent --zone="$zone" --remove-rich-rule="rule family='ipv4' port port='${SSH_PORT:-22}' protocol='tcp' accept" >/dev/null 2>&1 || true
                 firewall-cmd --permanent --zone="$zone" --remove-rich-rule="rule family='ipv4' port port='${SSH_PORT:-22}' protocol='tcp' drop" >/dev/null 2>&1 || true
             done
             
-            # 3. Explicitly allow VPN traffic and Dashboard
-            # Allow WireGuard UDP port for tunnel establishment
+            # 3. Allow WireGuard UDP port for tunnel establishment
             firewall-cmd --permanent --add-port="${WG_PORT:-51820}/udp" >/dev/null 2>&1 || true
             
-            # Allow SSH strictly from the WireGuard subnet (Priority 0 - Default)
-            firewall-cmd --permanent --add-rich-rule="rule family='ipv4' source address='${WG_SUBNET}' port port='${SSH_PORT:-22}' protocol='tcp' accept" >/dev/null 2>&1 || true
+            # --- STRICT ZERO TRUST HIERARCHY ---
+            # Priority -100: Admin Whitelist (Injected dynamically later in the script to prevent lockout)
             
-            # Allow Dashboard UI strictly from the WireGuard subnet
-            firewall-cmd --permanent --add-rich-rule="rule family='ipv4' source address='${WG_SUBNET}' port port='9999' protocol='tcp' accept" >/dev/null 2>&1 || true
+            # Priority -50: Allow SSH & UI Dashboard strictly from the WireGuard subnet
+            firewall-cmd --permanent --add-rich-rule="rule priority='-50' family='ipv4' source address='${WG_SUBNET}' port port='${SSH_PORT:-22}' protocol='tcp' accept" >/dev/null 2>&1 || true
+            firewall-cmd --permanent --add-rich-rule="rule priority='-50' family='ipv4' source address='${WG_SUBNET}' port port='9999' protocol='tcp' accept" >/dev/null 2>&1 || true
             
-            # 4. BULLETPROOF DROP: Explicitly block SSH from anywhere else
-            # Priority 100 ensures this rule is evaluated AFTER the VPN subnet accept rule (Priority 0)
-            # This creates a 'Deny All' default for SSH on the public interface
-            firewall-cmd --permanent --add-rich-rule="rule priority='100' family='ipv4' port port='${SSH_PORT:-22}' protocol='tcp' drop" >/dev/null 2>&1 || true
+            # Priority -10: BULLETPROOF DROP: Explicitly block SSH globally
+            # Negative priority evaluates BEFORE default Firewalld rules (0), but AFTER our Whitelist/VPN rules.
+            firewall-cmd --permanent --add-rich-rule="rule priority='-10' family='ipv4' port port='${SSH_PORT:-22}' protocol='tcp' drop" >/dev/null 2>&1 || true
+            # -----------------------------------
             
-            # 5. FORCE INTERFACE ASSIGNMENT (Critical for Alma 10)
-            # Double-check wg0 is in trusted zone (idempotent operation)
-            firewall-cmd --permanent --zone=trusted --add-interface=wg0 >/dev/null 2>&1 || true
-            
-            # 6. IMMEDIATE RELOAD (Critical)
-            # Apply all permanent rules to the runtime environment immediately
-            firewall-cmd --reload >/dev/null 2>&1 || true
-            
-            # 7. VERIFICATION (Purple Team Check)
-            # Validate that wg0 is correctly assigned to the trusted zone
-            if ! firewall-cmd --zone=trusted --list-interfaces | grep -q "wg0"; then
-                log "WARN" "WARNING: wg0 interface not found in trusted zone. SSH may remain exposed."
+            # 4. VERIFICATION (Purple Team Check)
+            if ! firewall-cmd --permanent --zone=trusted --list-interfaces | grep -q "wg0"; then
+                log "WARN" "WARNING: wg0 interface not found in permanent trusted zone."
             fi
+            
+            # Note: We intentionally DO NOT reload here. We wait for the whitelist injection 
+            # at the end of the Firewalld section to guarantee an atomic, safe reload that keeps the admin session alive.
         fi
         # ------------------------------
 
@@ -4019,7 +4008,7 @@ EOF
 # SYSWARDEN v9.40 - UI DASHBOARD GENERATION (EXPANDED REGISTRY)
 # ==============================================================================
 function generate_dashboard() {
-    log "INFO" "Generating the Serverless Dashboard UI (Expanded v9.81)..."
+    log "INFO" "Generating the Serverless Dashboard UI (Expanded v9.82)..."
     
     local UI_DIR="/etc/syswarden/ui"
     mkdir -p "$UI_DIR"
@@ -4084,7 +4073,7 @@ function generate_dashboard() {
             <div class="flex justify-between h-16 items-center">
                 <div class="flex items-center gap-3">
                     <div class="w-3 h-3 bg-red-500 rounded-full animate-pulse shadow-[0_0_10px_rgba(239,68,68,0.7)]" id="status-indicator"></div>
-                    <h1 class="text-xl font-bold tracking-tight">SysWarden <span class="text-brand-500">v9.81</span></h1>
+                    <h1 class="text-xl font-bold tracking-tight">SysWarden <span class="text-brand-500">v9.82</span></h1>
                 </div>
                 
                 <div class="flex items-center gap-2 bg-gray-100 dark:bg-dark-900 p-1 rounded-lg border border-gray-200 dark:border-gray-700">
@@ -4921,7 +4910,7 @@ fi
 if [[ "$MODE" != "update" ]]; then
     clear
     echo -e "${GREEN}#############################################################"
-    echo -e "#     SysWarden Tool Installer (Universal v9.81)     #"
+    echo -e "#     SysWarden Tool Installer (Universal v9.82)     #"
     echo -e "#############################################################${NC}"
 fi
 
