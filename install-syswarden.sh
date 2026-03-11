@@ -33,7 +33,7 @@ LOG_FILE="/var/log/syswarden-install.log"
 CONF_FILE="/etc/syswarden.conf"
 SET_NAME="syswarden_blacklist"
 TMP_DIR=$(mktemp -d)
-VERSION="v9.74"
+VERSION="v9.75"
 SYSWARDEN_DIR="/etc/syswarden"
 WHITELIST_FILE="$SYSWARDEN_DIR/whitelist.txt"
 BLOCKLIST_FILE="$SYSWARDEN_DIR/blocklist.txt"
@@ -116,23 +116,24 @@ detect_os_backend() {
 
 install_dependencies() {
     log "INFO" "Checking dependencies..."
-    local missing_common=""
+    local missing_common=()
 
     if [[ -f /etc/debian_version ]]; then
         log "INFO" "Updating apt repositories..."
         apt-get update -qq
     fi
 
-    if ! command -v curl >/dev/null; then missing_common="$missing_common curl"; fi
-    if ! command -v python3 >/dev/null; then missing_common="$missing_common python3"; fi
-    if ! command -v whois >/dev/null; then missing_common="$missing_common whois"; fi
+    if ! command -v curl >/dev/null; then missing_common+=("curl"); fi
+    if ! command -v python3 >/dev/null; then missing_common+=("python3"); fi
+    if ! command -v whois >/dev/null; then missing_common+=("whois"); fi
     # --- FIX: Added 'jq' dependency required for telemetry JSON generation ---
-    if ! command -v jq >/dev/null; then missing_common="$missing_common jq"; fi
+    if ! command -v jq >/dev/null; then missing_common+=("jq"); fi
     # -----------------------------------------------------------------------
     
-    if [[ -n "$missing_common" ]]; then
-        if [[ -f /etc/debian_version ]]; then apt-get install -y $missing_common; 
-        elif [[ -f /etc/redhat-release ]]; then dnf install -y $missing_common; fi
+    # Check if array is not empty
+    if [[ ${#missing_common[@]} -gt 0 ]]; then
+        if [[ -f /etc/debian_version ]]; then apt-get install -y "${missing_common[@]}"; 
+        elif [[ -f /etc/redhat-release ]]; then dnf install -y "${missing_common[@]}"; fi
     fi
 
     # Python Requests (Required for AbuseIPDB Reporter)
@@ -3976,7 +3977,7 @@ EOF
 # SYSWARDEN v9.40 - UI DASHBOARD GENERATION (EXPANDED REGISTRY)
 # ==============================================================================
 function generate_dashboard() {
-    log "INFO" "Generating the Serverless Dashboard UI (Expanded v9.74)..."
+    log "INFO" "Generating the Serverless Dashboard UI (Expanded v9.75)..."
     
     local UI_DIR="/etc/syswarden/ui"
     mkdir -p "$UI_DIR"
@@ -4041,7 +4042,7 @@ function generate_dashboard() {
             <div class="flex justify-between h-16 items-center">
                 <div class="flex items-center gap-3">
                     <div class="w-3 h-3 bg-red-500 rounded-full animate-pulse shadow-[0_0_10px_rgba(239,68,68,0.7)]" id="status-indicator"></div>
-                    <h1 class="text-xl font-bold tracking-tight">SysWarden <span class="text-brand-500">v9.74</span></h1>
+                    <h1 class="text-xl font-bold tracking-tight">SysWarden <span class="text-brand-500">v9.75</span></h1>
                 </div>
                 
                 <div class="flex items-center gap-2 bg-gray-100 dark:bg-dark-900 p-1 rounded-lg border border-gray-200 dark:border-gray-700">
@@ -4876,7 +4877,7 @@ fi
 if [[ "$MODE" != "update" ]]; then
     clear
     echo -e "${GREEN}#############################################################"
-    echo -e "#     SysWarden Tool Installer (Universal v9.74)     #"
+    echo -e "#     SysWarden Tool Installer (Universal v9.75)     #"
     echo -e "#############################################################${NC}"
 fi
 
