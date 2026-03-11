@@ -33,7 +33,7 @@ LOG_FILE="/var/log/syswarden-install.log"
 CONF_FILE="/etc/syswarden.conf"
 SET_NAME="syswarden_blacklist"
 TMP_DIR=$(mktemp -d)
-VERSION="v9.83"
+VERSION="v9.84"
 SYSWARDEN_DIR="/etc/syswarden"
 WHITELIST_FILE="$SYSWARDEN_DIR/whitelist.txt"
 BLOCKLIST_FILE="$SYSWARDEN_DIR/blocklist.txt"
@@ -458,7 +458,8 @@ auto_whitelist_admin() {
         # because the VPN subnet is already allowed natively (Priority -50).
         local is_vpn_ip=0
         if [[ -n "${WG_SUBNET:-}" ]]; then
-            local subnet_base=$(echo "$WG_SUBNET" | cut -d'.' -f1,2,3)
+            local subnet_base
+			subnet_base=$(echo "$WG_SUBNET" | cut -d'.' -f1,2,3)
             if [[ "$admin_ip" == "${subnet_base}."* ]]; then
                 is_vpn_ip=1
             fi
@@ -1077,31 +1078,31 @@ EOF
             # 2. Universal SSH Port Purge (Cleans lingering SSH rules from ALL zones)
             for zone in $(firewall-cmd --get-zones 2>/dev/null || echo "public"); do
                 # --- FIX ALMA/RHEL: AGGRESSIVE PHANTOM SERVICE PURGE ---
-                # Firewalld templates stubbornly keep 'ssh' visible. We purge it from both Runtime and Permanent states.
                 firewall-cmd --zone="$zone" --remove-service="ssh" >/dev/null 2>&1 || true
                 firewall-cmd --permanent --zone="$zone" --remove-service="ssh" >/dev/null 2>&1 || true
                 
                 firewall-cmd --zone="$zone" --remove-port="${SSH_PORT:-22}/tcp" >/dev/null 2>&1 || true
                 firewall-cmd --permanent --zone="$zone" --remove-port="${SSH_PORT:-22}/tcp" >/dev/null 2>&1 || true
                 
-                # Explicitly remove any existing rich rules for SSH to prevent conflicts
-                firewall-cmd --permanent --zone="$zone" --remove-rich-rule="rule family='ipv4' port port='${SSH_PORT:-22}' protocol='tcp' accept" >/dev/null 2>&1 || true
-                firewall-cmd --permanent --zone="$zone" --remove-rich-rule="rule family='ipv4' port port='${SSH_PORT:-22}' protocol='tcp' drop" >/dev/null 2>&1 || true
+                # Cleanup old priority rules to prevent conflicts
+                firewall-cmd --permanent --zone="$zone" --remove-rich-rule="rule priority='-50' family='ipv4' source address='${WG_SUBNET}' port port='${SSH_PORT:-22}' protocol='tcp' accept" >/dev/null 2>&1 || true
+                firewall-cmd --permanent --zone="$zone" --remove-rich-rule="rule priority='-50' family='ipv4' source address='${WG_SUBNET}' port port='9999' protocol='tcp' accept" >/dev/null 2>&1 || true
+                firewall-cmd --permanent --zone="$zone" --remove-rich-rule="rule priority='-10' port port='${SSH_PORT:-22}' protocol='tcp' drop" >/dev/null 2>&1 || true
+                firewall-cmd --permanent --zone="$zone" --remove-rich-rule="rule priority='-10' family='ipv4' port port='${SSH_PORT:-22}' protocol='tcp' drop" >/dev/null 2>&1 || true
             done
             
             # 3. Allow WireGuard UDP port for tunnel establishment
             firewall-cmd --permanent --add-port="${WG_PORT:-51820}/udp" >/dev/null 2>&1 || true
             
-            # --- STRICT ZERO TRUST HIERARCHY ---
-            # Priority -100: Admin Whitelist (Injected dynamically later in the script to prevent lockout)
+            # --- STRICT ZERO TRUST HIERARCHY (v9.84) - DEBIAN PARITY) ---
             
-            # Priority -50: Allow SSH & UI Dashboard strictly from the WireGuard subnet
-            firewall-cmd --permanent --add-rich-rule="rule priority='-50' family='ipv4' source address='${WG_SUBNET}' port port='${SSH_PORT:-22}' protocol='tcp' accept" >/dev/null 2>&1 || true
-            firewall-cmd --permanent --add-rich-rule="rule priority='-50' family='ipv4' source address='${WG_SUBNET}' port port='9999' protocol='tcp' accept" >/dev/null 2>&1 || true
+            # Priority -1000: Highest priority. Allow SSH & Dashboard strictly from VPN.
+            firewall-cmd --permanent --add-rich-rule="rule priority='-1000' family='ipv4' source address='${WG_SUBNET}' port port='${SSH_PORT:-22}' protocol='tcp' accept" >/dev/null 2>&1 || true
+            firewall-cmd --permanent --add-rich-rule="rule priority='-1000' family='ipv4' source address='${WG_SUBNET}' port port='9999' protocol='tcp' accept" >/dev/null 2>&1 || true
             
-            # Priority -10: BULLETPROOF DROP: Explicitly block SSH globally
-            # Negative priority evaluates BEFORE default Firewalld rules (0), but AFTER our Whitelist/VPN rules.
-            firewall-cmd --permanent --add-rich-rule="rule priority='-10' family='ipv4' port port='${SSH_PORT:-22}' protocol='tcp' drop" >/dev/null 2>&1 || true
+            # Priority -900: BULLETPROOF DROP. Executes BEFORE the Admin Whitelist (-100).
+            # This mimics Debian: SSH is strictly dropped globally before any IP whitelists are evaluated.
+            firewall-cmd --permanent --add-rich-rule="rule priority='-900' port port='${SSH_PORT:-22}' protocol='tcp' drop" >/dev/null 2>&1 || true
             # -----------------------------------
             
             # 4. VERIFICATION (Purple Team Check)
@@ -1338,17 +1339,27 @@ EOF
             fi
         fi
 		
-		# --- FIX: RE-INJECT WHITELIST ACCEPT RULES ---
-        # Inserted BEFORE WireGuard Cloaking so that WG rules push this down and stay on top.
+		# --- FIX: STRICT WHITELIST SYNCHRONIZATION (ANTI-GHOST RULES) ---
+        log "INFO" "Synchronizing Whitelist with Firewalld memory..."
+        
+        # 1. Hunt and destroy ALL existing priority -100 rules in permanent memory
+        while IFS= read -r rule; do
+            if [[ "$rule" == *"priority=\"-100\""* ]]; then
+                firewall-cmd --permanent --remove-rich-rule="$rule" >/dev/null 2>&1 || true
+            fi
+        done < <(firewall-cmd --permanent --list-rich-rules 2>/dev/null || true)
+
+        # 2. Re-inject ONLY the IPs that are currently in the text file
         if [[ -s "$WHITELIST_FILE" ]]; then
             while IFS= read -r wl_ip; do
                 [[ -z "$wl_ip" ]] && continue
-                if ! iptables -C INPUT -s "$wl_ip" -j ACCEPT 2>/dev/null; then
-                    iptables -I INPUT 1 -s "$wl_ip" -j ACCEPT
-                fi
+                # Clean up any old unprioritized legacy rule if it exists
+                firewall-cmd --permanent --remove-rich-rule="rule family='ipv4' source address='$wl_ip' accept" >/dev/null 2>&1 || true
+                # Inject the new prioritized rule
+                firewall-cmd --permanent --add-rich-rule="rule priority='-100' family='ipv4' source address='$wl_ip' accept" >/dev/null 2>&1 || true
             done < "$WHITELIST_FILE"
         fi
-        # ---------------------------------------------
+        # ----------------------------------------------------------------
 
         # --- ESSENTIAL CONNECTION TRACKING (ALWAYS ACTIVE) ---
         while iptables -D INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null; do :; done
@@ -4029,7 +4040,7 @@ EOF
 # SYSWARDEN v9.40 - UI DASHBOARD GENERATION (EXPANDED REGISTRY)
 # ==============================================================================
 function generate_dashboard() {
-    log "INFO" "Generating the Serverless Dashboard UI (Expanded v9.83)..."
+    log "INFO" "Generating the Serverless Dashboard UI (Expanded v9.84)..."
     
     local UI_DIR="/etc/syswarden/ui"
     mkdir -p "$UI_DIR"
@@ -4094,7 +4105,7 @@ function generate_dashboard() {
             <div class="flex justify-between h-16 items-center">
                 <div class="flex items-center gap-3">
                     <div class="w-3 h-3 bg-red-500 rounded-full animate-pulse shadow-[0_0_10px_rgba(239,68,68,0.7)]" id="status-indicator"></div>
-                    <h1 class="text-xl font-bold tracking-tight">SysWarden <span class="text-brand-500">v9.83</span></h1>
+                    <h1 class="text-xl font-bold tracking-tight">SysWarden <span class="text-brand-500">v9.84</span></h1>
                 </div>
                 
                 <div class="flex items-center gap-2 bg-gray-100 dark:bg-dark-900 p-1 rounded-lg border border-gray-200 dark:border-gray-700">
@@ -4423,6 +4434,7 @@ import http.server
 import socketserver
 import sys
 import os
+import socket
 
 BIND_IP = sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1"
 PORT = 9999
@@ -4441,7 +4453,19 @@ class SecureHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
         super().end_headers()
 
-with socketserver.TCPServer((BIND_IP, PORT), SecureHTTPRequestHandler) as httpd:
+class BulletproofTCPServer(socketserver.TCPServer):
+    # FIX 1: Bypass TIME_WAIT (Error 98 - Address already in use)
+    allow_reuse_address = True 
+    
+    def server_bind(self):
+        try:
+            # FIX 2: Native Kernel IP_FREEBIND (15) allows binding to an IP that doesn't physically exist yet
+            self.socket.setsockopt(socket.IPPROTO_IP, 15, 1)
+        except Exception:
+            pass
+        super().server_bind()
+
+with BulletproofTCPServer((BIND_IP, PORT), SecureHTTPRequestHandler) as httpd:
     httpd.serve_forever()
 EOF
     chmod +x "$UI_SERVER_BIN"
@@ -4931,7 +4955,7 @@ fi
 if [[ "$MODE" != "update" ]]; then
     clear
     echo -e "${GREEN}#############################################################"
-    echo -e "#     SysWarden Tool Installer (Universal v9.83)     #"
+    echo -e "#     SysWarden Tool Installer (Universal v9.84)     #"
     echo -e "#############################################################${NC}"
 fi
 
