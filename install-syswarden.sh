@@ -33,7 +33,7 @@ LOG_FILE="/var/log/syswarden-install.log"
 CONF_FILE="/etc/syswarden.conf"
 SET_NAME="syswarden_blacklist"
 TMP_DIR=$(mktemp -d)
-VERSION="v9.77"
+VERSION="v9.78"
 SYSWARDEN_DIR="/etc/syswarden"
 WHITELIST_FILE="$SYSWARDEN_DIR/whitelist.txt"
 BLOCKLIST_FILE="$SYSWARDEN_DIR/blocklist.txt"
@@ -1057,10 +1057,10 @@ EOF
             firewall-cmd --permanent --remove-service="ssh" >/dev/null 2>&1 || true
             firewall-cmd --permanent --add-port="${WG_PORT:-51820}/udp" >/dev/null 2>&1 || true
             
-            # Explicitly allow SSH from the WireGuard Subnet ONLY
+            # Explicitly allow SSH and UI Dashboard from the WireGuard Subnet ONLY
             firewall-cmd --permanent --add-rich-rule="rule family='ipv4' source address='${WG_SUBNET}' port port='${SSH_PORT:-22}' protocol='tcp' accept" >/dev/null 2>&1 || true
+            firewall-cmd --permanent --add-rich-rule="rule family='ipv4' source address='${WG_SUBNET}' port port='9999' protocol='tcp' accept" >/dev/null 2>&1 || true
         elif [[ -n "${SSH_PORT:-}" ]]; then
-            firewall-cmd --permanent --add-port="${SSH_PORT}/tcp" >/dev/null 2>&1 || true
         fi
         # ------------------------------
 
@@ -2937,15 +2937,10 @@ setup_wireguard() {
             POSTUP="nft add table inet syswarden_wg; nft add chain inet syswarden_wg prerouting { type nat hook prerouting priority 0 \\; }; nft add chain inet syswarden_wg postrouting { type nat hook postrouting priority 100 \\; }; nft add rule inet syswarden_wg postrouting oifname \"$ACTIVE_IF\" masquerade"
             POSTDOWN="nft delete table inet syswarden_wg 2>/dev/null || true"
             ;;
-        "firewalld")
-            # Smart fallback: Attempts the modern method (add-forward), otherwise reverts to Direct Rules (old RHEL)
-            POSTUP="firewall-cmd --add-masquerade; firewall-cmd --add-interface=wg0 2>/dev/null || true; firewall-cmd --add-forward 2>/dev/null || { firewall-cmd --direct --add-rule ipv4 filter FORWARD 0 -i wg0 -j ACCEPT; firewall-cmd --direct --add-rule ipv4 filter FORWARD 0 -o wg0 -j ACCEPT; }"
-            POSTDOWN="firewall-cmd --remove-masquerade; firewall-cmd --remove-interface=wg0 2>/dev/null || true; firewall-cmd --remove-forward 2>/dev/null || { firewall-cmd --direct --remove-rule ipv4 filter FORWARD 0 -i wg0 -j ACCEPT; firewall-cmd --direct --remove-rule ipv4 filter FORWARD 0 -o wg0 -j ACCEPT; }"
-            ;;
         *)
-            # Standard Iptables / UFW Fallback
-            POSTUP="iptables -t nat -A POSTROUTING -s $WG_SUBNET -o $ACTIVE_IF -j MASQUERADE; iptables -I FORWARD 1 -i wg0 -j ACCEPT; iptables -I FORWARD 1 -o wg0 -j ACCEPT"
-            POSTDOWN="iptables -t nat -D POSTROUTING -s $WG_SUBNET -o $ACTIVE_IF -j MASQUERADE; iptables -D FORWARD -i wg0 -j ACCEPT; iptables -D FORWARD -o wg0 -j ACCEPT"
+            # Standard Iptables / UFW / Firewalld Fallback (Bypasses SELinux DBus limits)
+            POSTUP="iptables -t nat -I POSTROUTING 1 -s $WG_SUBNET -o $ACTIVE_IF -j MASQUERADE; iptables -I FORWARD 1 -i wg0 -j ACCEPT; iptables -I FORWARD 1 -o wg0 -j ACCEPT"
+            POSTDOWN="iptables -t nat -D POSTROUTING -s $WG_SUBNET -o $ACTIVE_IF -j MASQUERADE 2>/dev/null || true; iptables -D FORWARD -i wg0 -j ACCEPT 2>/dev/null || true; iptables -D FORWARD -o wg0 -j ACCEPT 2>/dev/null || true"
             ;;
     esac
 
@@ -3977,7 +3972,7 @@ EOF
 # SYSWARDEN v9.40 - UI DASHBOARD GENERATION (EXPANDED REGISTRY)
 # ==============================================================================
 function generate_dashboard() {
-    log "INFO" "Generating the Serverless Dashboard UI (Expanded v9.77)..."
+    log "INFO" "Generating the Serverless Dashboard UI (Expanded v9.78)..."
     
     local UI_DIR="/etc/syswarden/ui"
     mkdir -p "$UI_DIR"
@@ -4042,7 +4037,7 @@ function generate_dashboard() {
             <div class="flex justify-between h-16 items-center">
                 <div class="flex items-center gap-3">
                     <div class="w-3 h-3 bg-red-500 rounded-full animate-pulse shadow-[0_0_10px_rgba(239,68,68,0.7)]" id="status-indicator"></div>
-                    <h1 class="text-xl font-bold tracking-tight">SysWarden <span class="text-brand-500">v9.77</span></h1>
+                    <h1 class="text-xl font-bold tracking-tight">SysWarden <span class="text-brand-500">v9.78</span></h1>
                 </div>
                 
                 <div class="flex items-center gap-2 bg-gray-100 dark:bg-dark-900 p-1 rounded-lg border border-gray-200 dark:border-gray-700">
@@ -4401,10 +4396,12 @@ EOF
         cat << EOF > /etc/systemd/system/syswarden-ui.service
 [Unit]
 Description=SysWarden Secure Web UI
-After=network.target
+After=network.target wg-quick@wg0.service
 
 [Service]
 Type=simple
+# --- FIX: BIND TO VPN IP INDEPENDENTLY OF INTERFACE STATE ---
+FreeBind=yes
 # --- SECURITY FIX: PRIVILEGE ESCALATION PREVENTION ---
 DynamicUser=yes
 NoNewPrivileges=yes
@@ -4877,7 +4874,7 @@ fi
 if [[ "$MODE" != "update" ]]; then
     clear
     echo -e "${GREEN}#############################################################"
-    echo -e "#     SysWarden Tool Installer (Universal v9.77)     #"
+    echo -e "#     SysWarden Tool Installer (Universal v9.78)     #"
     echo -e "#############################################################${NC}"
 fi
 
