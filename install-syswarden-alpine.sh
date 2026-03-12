@@ -42,7 +42,7 @@ LOG_FILE="/var/log/syswarden-install.log"
 CONF_FILE="/etc/syswarden.conf"
 SET_NAME="syswarden_blacklist"
 TMP_DIR=$(mktemp -d)
-VERSION="v9.90"
+VERSION="v9.91"
 SYSWARDEN_DIR="/etc/syswarden"
 WHITELIST_FILE="$SYSWARDEN_DIR/whitelist.txt"
 BLOCKLIST_FILE="$SYSWARDEN_DIR/blocklist.txt"
@@ -456,9 +456,23 @@ auto_whitelist_admin() {
     
     # Process the IP
     if [[ "$admin_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && [[ "$admin_ip" != "127.0.0.1" ]]; then
-        if ! grep -q "^${admin_ip}$" "$WHITELIST_FILE" 2>/dev/null; then
-            log "INFO" "Auto-whitelisting current admin SSH session IP: $admin_ip"
-            echo "$admin_ip" >> "$WHITELIST_FILE"
+        # --- FIX: DO NOT AUTO-WHITELIST THE VPN SUBNET ---
+        local is_vpn_ip=0
+        if [[ -n "${WG_SUBNET:-}" ]]; then
+            local subnet_base
+            subnet_base=$(echo "$WG_SUBNET" | cut -d'.' -f1,2,3)
+            if [[ "$admin_ip" == "${subnet_base}."* ]]; then
+                is_vpn_ip=1
+            fi
+        fi
+        
+        if [[ $is_vpn_ip -eq 1 ]]; then
+            log "INFO" "Admin connected via VPN ($admin_ip). Skipping absolute whitelist."
+        else
+            if ! grep -q "^${admin_ip}$" "$WHITELIST_FILE" 2>/dev/null; then
+                log "INFO" "Auto-whitelisting current admin SSH session IP: $admin_ip"
+                echo "$admin_ip" >> "$WHITELIST_FILE"
+            fi
         fi
     else
         log "WARN" "CRITICAL: Could not auto-detect admin SSH IP. You risk being locked out!"
@@ -2776,7 +2790,8 @@ setup_wireguard() {
                 curl -4 -s --connect-timeout 3 icanhazip.com 2>/dev/null || \
                 ip -4 addr show "$ACTIVE_IF" | grep -oEo 'inet [0-9.]+' | awk '{print $2}' | head -n 1)
     
-    local SUBNET_BASE; SUBNET_BASE=$(echo "$WG_SUBNET" | cut -d'.' -f1,2,3)
+    local SUBNET_BASE
+	SUBNET_BASE=$(echo "$WG_SUBNET" | cut -d'.' -f1,2,3)
     local SERVER_VPN_IP="${SUBNET_BASE}.1"
     local CLIENT_VPN_IP="${SUBNET_BASE}.2"
 
@@ -3321,7 +3336,7 @@ EOF
 # SYSWARDEN V9.40 - UI DASHBOARD GENERATION (EXPANDED REGISTRY)
 # ==============================================================================
 function generate_dashboard() {
-    log "INFO" "Generating the Serverless Dashboard UI (Expanded v9.90)..."
+    log "INFO" "Generating the Serverless Dashboard UI (Expanded v9.91)..."
     
     local UI_DIR="/etc/syswarden/ui"
     mkdir -p "$UI_DIR"
@@ -3386,7 +3401,7 @@ function generate_dashboard() {
             <div class="flex justify-between h-16 items-center">
                 <div class="flex items-center gap-3">
                     <div class="w-3 h-3 bg-red-500 rounded-full animate-pulse shadow-[0_0_10px_rgba(239,68,68,0.7)]" id="status-indicator"></div>
-                    <h1 class="text-xl font-bold tracking-tight">SysWarden <span class="text-brand-500">v9.90</span></h1>
+                    <h1 class="text-xl font-bold tracking-tight">SysWarden <span class="text-brand-500">v9.91</span></h1>
                 </div>
                 
                 <div class="flex items-center gap-2 bg-gray-100 dark:bg-dark-900 p-1 rounded-lg border border-gray-200 dark:border-gray-700">
