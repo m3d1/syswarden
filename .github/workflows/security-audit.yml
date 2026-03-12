@@ -5,39 +5,87 @@ on:
     branches: [ "main", "master" ]
     paths:
       - '**.sh'
+      - '**.py'
       - '.github/workflows/**'
   pull_request:
     branches: [ "main", "master" ]
     paths:
       - '**.sh'
+      - '**.py'
 
 jobs:
-  shellcheck:
-    name: Bash Static Analysis (ShellCheck)
+  # ==========================================
+  # JOB 1: CODE HYGIENE (ShellCheck & shfmt)
+  # ==========================================
+  hygiene:
+    name: Code Hygiene
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Run ShellCheck on SysWarden script
-        # On cible uniquement les avertissements et erreurs pour ne pas polluer les logs
-        run: shellcheck --severity=warning install-syswarden.sh
+      - name: Run ShellCheck on Bash scripts
+        # Scan all .sh scripts with a minimum severity of 'warning'
+        run: shellcheck --severity=warning *.sh
 
-  trivy:
-    name: Vulnerability & Secret Scan (Trivy)
+      - name: Setup shfmt
+        uses: mfinelli/setup-shfmt@v3
+        
+      - name: Check Bash formatting (shfmt)
+        # -d: diff (do not modify files, fail if improperly formatted)
+        # -i 4: indent with 4 spaces
+        # -ci: correctly indent switch cases
+        run: shfmt -d -i 4 -ci *.sh
+
+  # ==========================================
+  # JOB 2: SECRET SCANNING (Gitleaks)
+  # ==========================================
+  anti-leaks:
+    name: Secret Scanning
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Required by Gitleaks to scan the entire commit history
 
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ==========================================
+  # JOB 3: MULTI-LANGUAGE SAST (CodeQL & Trivy)
+  # ==========================================
+  sast:
+    name: SAST & Vulnerability Scan
+    runs-on: ubuntu-latest
+    # Permissions required for CodeQL to upload its results to the GitHub "Security" tab
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # --- Python/JS Logic Analysis (CodeQL) ---
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: python # Specifically analyzes the UI and AbuseIPDB daemons
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+
+      # --- OS/Dependency Vulnerability Analysis (Trivy) ---
       - name: Run Trivy filesystem scan
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: 'fs'
           scan-ref: '.'
           format: 'table'
-          # Force l'échec du job si une vulnérabilité critique est trouvée
-          exit-code: '1'
+          exit-code: '1' # Fails the CI pipeline if a critical vulnerability is found
           ignore-unfixed: true
           vuln-type: 'os,library'
           severity: 'CRITICAL,HIGH'

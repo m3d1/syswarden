@@ -287,6 +287,103 @@ else
     info "AbuseIPDB Reporter is not installed (Skipped by user)."
 fi
 
+# ==============================================================================
+# === Phase 6: VPN & Zero Trust Remote Access (WireGuard) ===
+# ==============================================================================
+echo -e "\n=== Phase 6: VPN & Zero Trust Remote Access (WireGuard) ==="
+
+# Purple Team Verification: Checking if the VPN is configured and acting as a strict gateway
+if [[ -d "/etc/wireguard" ]] && [[ -f "/etc/wireguard/wg0.conf" ]]; then
+    
+    # --- Check 1: Tunnel Interface State ---
+    TOTAL=$((TOTAL + 1))
+    if ip link show wg0 >/dev/null 2>&1; then
+        pass "WireGuard interface (wg0) is UP and operational."
+        SCORE=$((SCORE + 1))
+    else
+        fail "WireGuard interface (wg0) is DOWN or missing."
+    fi
+
+    # --- Dynamic SSH Port Extraction ---
+    # We query active sockets to find the real SSH port instead of assuming port 22
+    SSH_PORT=$(ss -tlnp 2>/dev/null | grep sshd | awk '{print $4}' | awk -F':' '{print $NF}' | head -n 1 || echo "")
+    if [[ -z "$SSH_PORT" ]]; then
+        SSH_PORT=$(netstat -tlnp 2>/dev/null | grep sshd | awk '{print $4}' | awk -F':' '{print $NF}' | head -n 1 || echo "")
+    fi
+    SSH_PORT=${SSH_PORT:-22}
+
+    # --- Check 2: Purple Team - SSH Global Cloaking (The Priority Guillotine) ---
+    # Validates that the public SSH port is explicitly dropped BEFORE any whitelist evaluation.
+    TOTAL=$((TOTAL + 1))
+    CLOAK_PASSED=0
+
+    if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld 2>/dev/null; then
+        # Firewalld: Search active RAM for the strict -900 priority drop (IPv4 + IPv6 agnostic)
+        if firewall-cmd --list-rich-rules 2>/dev/null | grep -q "priority=\"-900\".*port=\"${SSH_PORT}\".*drop"; then
+            CLOAK_PASSED=1
+        fi
+    elif command -v nft >/dev/null 2>&1 && nft list table inet syswarden_table >/dev/null 2>&1; then
+        # Nftables: Use '-n' to force numeric output (prevents '22' from resolving to 'ssh')
+        if nft -n list chain inet syswarden_table input 2>/dev/null | grep -Eq "tcp dport ${SSH_PORT}.*drop"; then
+            CLOAK_PASSED=1
+        fi
+    elif command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+        # UFW: Search for the absolute DENY rule on the SSH port
+        if ufw status 2>/dev/null | grep -qE "^${SSH_PORT}/tcp[[:space:]]+DENY[[:space:]]+Anywhere"; then
+            CLOAK_PASSED=1
+        fi
+    elif command -v iptables >/dev/null 2>&1; then
+        # IPTables (Legacy Fallback)
+        if iptables -C INPUT -p tcp --dport "${SSH_PORT}" -j DROP 2>/dev/null; then
+            CLOAK_PASSED=1
+        fi
+    fi
+
+    if [[ $CLOAK_PASSED -eq 1 ]]; then
+        pass "SSH Cloaking VERIFIED: Port $SSH_PORT is strictly dropped globally (Priority Guillotine)."
+        SCORE=$((SCORE + 1))
+    else
+        fail "SSH Cloaking FAILED: Port $SSH_PORT is exposed or missing the global drop rule."
+    fi
+
+    # --- Check 3: Purple Team - VPN Gateway Bypass (The Golden Key) ---
+    # Validates that the WireGuard subnet/interface is strictly allowed to bypass the Guillotine.
+    TOTAL=$((TOTAL + 1))
+    VPN_ALLOW_PASSED=0
+
+    if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld 2>/dev/null; then
+        # Firewalld: Search active RAM for the strict -1000 priority accept
+        if firewall-cmd --list-rich-rules 2>/dev/null | grep -q "priority=\"-1000\".*port=\"${SSH_PORT}\".*accept"; then
+            VPN_ALLOW_PASSED=1
+        fi
+    elif command -v nft >/dev/null 2>&1 && nft list table inet syswarden_table >/dev/null 2>&1; then
+        # Nftables: Use '-n' and fuzzy regex for the interface set which can be reordered by the kernel
+        if nft -n list chain inet syswarden_table input 2>/dev/null | grep -Eq "iifname.*wg0.*tcp dport ${SSH_PORT}.*accept"; then
+            VPN_ALLOW_PASSED=1
+        fi
+    elif command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+        # UFW: Search for the ALLOW rule originating from the VPN subnet
+        if ufw status 2>/dev/null | grep -qE "Anywhere[[:space:]]+ALLOW[[:space:]]+10\."; then
+            VPN_ALLOW_PASSED=1
+        fi
+    elif command -v iptables >/dev/null 2>&1; then
+        # IPTables (Legacy Fallback)
+        if iptables -C INPUT -i wg0 -p tcp --dport "${SSH_PORT}" -j ACCEPT 2>/dev/null; then
+            VPN_ALLOW_PASSED=1
+        fi
+    fi
+
+    if [[ $VPN_ALLOW_PASSED -eq 1 ]]; then
+        pass "VPN Gateway VERIFIED: SSH access is exclusively bound to the WireGuard tunnel."
+        SCORE=$((SCORE + 1))
+    else
+        fail "VPN Gateway FAILED: Explicit accept rule for WireGuard not found."
+    fi
+
+else
+    info "WireGuard VPN is not installed or configured (Skipped)."
+fi
+
 # --- 7. AUDIT SUMMARY ---
 echo -e "\n${BOLD}==============================================================================${NC}"
 if [[ $SCORE -eq $TOTAL ]]; then
