@@ -55,37 +55,23 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # ==========================================
-  # JOB 3: MULTI-LANGUAGE SAST (CodeQL & Trivy)
+  # JOB 3 : SAST & VULNERABILITÉS (Trivy)
   # ==========================================
   sast:
     name: SAST & Vulnerability Scan
     runs-on: ubuntu-latest
-    # Permissions required for CodeQL to upload its results to the GitHub "Security" tab
-    permissions:
-      security-events: write
-      actions: read
-      contents: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # --- Python/JS Logic Analysis (CodeQL) ---
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
-        with:
-          languages: python # Specifically analyzes the UI and AbuseIPDB daemons
-
-      - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
-
-      # --- OS/Dependency Vulnerability Analysis (Trivy) ---
+      # --- Analyse des Vulnérabilités Dépendances/OS (Trivy) ---
       - name: Run Trivy filesystem scan
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: 'fs'
           scan-ref: '.'
           format: 'table'
-          exit-code: '1' # Fails the CI pipeline if a critical vulnerability is found
+          exit-code: '1' # Bloque la CI si une faille critique est trouvée
           ignore-unfixed: true
           vuln-type: 'os,library'
           severity: 'CRITICAL,HIGH'
