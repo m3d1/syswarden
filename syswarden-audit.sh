@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# SysWarden v10.06 - Audit Tool
+# SysWarden v10.07 - Audit Tool
 # Copyright (C) 2026 duggytuxy - Laurent M.
 #
 # This program is free software: you can redistribute it and/or modify
@@ -333,7 +333,9 @@ if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewa
         CLOAK_PASSED=1
     fi
 elif command -v nft >/dev/null 2>&1 && nft list table inet syswarden_table >/dev/null 2>&1; then
-    if nft -n list chain inet syswarden_table input 2>/dev/null | grep -Eq "tcp dport ${SSH_PORT}.*drop"; then
+    # DevSecOps Fix: Flatten output to prevent multi-line buffer tearing
+    NFT_RULES=$(nft -n list chain inet syswarden_table input 2>/dev/null | tr '\n' ' ' | tr '\t' ' ')
+    if echo "$NFT_RULES" | grep -qE "tcp dport ${SSH_PORT}.*drop"; then
         CLOAK_PASSED=1
     fi
 elif command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
@@ -367,7 +369,9 @@ if [[ -d "/etc/wireguard" ]] && [[ -f "/etc/wireguard/wg0.conf" ]]; then
             VPN_ALLOW_PASSED=1
         fi
     elif command -v nft >/dev/null 2>&1 && nft list table inet syswarden_table >/dev/null 2>&1; then
-        if nft -n list chain inet syswarden_table input 2>/dev/null | grep -Eq "iifname.*wg0.*tcp dport ${SSH_PORT}.*accept"; then
+        # DevSecOps Fix: Flatten output to prevent multi-line buffer tearing
+        NFT_RULES=$(nft -n list chain inet syswarden_table input 2>/dev/null | tr '\n' ' ' | tr '\t' ' ')
+        if echo "$NFT_RULES" | grep -qE "iifname.*wg0.*tcp dport ${SSH_PORT}.*accept"; then
             VPN_ALLOW_PASSED=1
         fi
     elif command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
