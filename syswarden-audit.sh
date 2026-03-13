@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# SysWarden v10.04 - Audit Tool
+# SysWarden v10.05 - Audit Tool
 # Copyright (C) 2026 duggytuxy - Laurent M.
 #
 # This program is free software: you can redistribute it and/or modify
@@ -193,11 +193,15 @@ else
     fail "Global Blocklist is missing or empty."
 fi
 
-# --- Verify GeoIP Threat Intelligence ---
-# Robust parsing: extracts GEOBLOCK_COUNTRIES and checks if the list is non-empty
-GEO_COUNTRIES=$(grep -E "^GEOBLOCK_COUNTRIES=" /etc/syswarden/syswarden.conf 2>/dev/null | cut -d'=' -f2 | tr -d '"' | tr -d "'" || true)
+# --- Load Native Configuration ---
+# We source the config file to let Bash natively handle quotes, exports, and variables.
+# This eliminates all grep/cut parsing errors.
+if [[ -f "/etc/syswarden.conf" ]]; then
+    source "/etc/syswarden.conf" 2>/dev/null || true
+fi
 
-if [[ -n "$GEO_COUNTRIES" ]]; then
+# --- Verify GeoIP Threat Intelligence ---
+if [[ -n "${GEOBLOCK_COUNTRIES:-}" ]]; then
     TOTAL=$((TOTAL + 1))
     pass "GeoIP Threat Intelligence is actively deployed and enforced."
 else
@@ -205,18 +209,15 @@ else
 fi
 
 # --- Verify ASN Routing Threat Intelligence ---
-# Robust parsing: checks if BLOCK_ASNS list is non-empty
-ASN_LIST=$(grep -E "^BLOCK_ASNS=" /etc/syswarden/syswarden.conf 2>/dev/null | cut -d'=' -f2 | tr -d '"' | tr -d "'" || true)
-if [[ -n "$ASN_LIST" ]]; then
+if [[ -n "${BLOCK_ASNS:-}" ]]; then
     TOTAL=$((TOTAL + 1))
     pass "Manual ASN Routing Defense is actively deployed."
 else
     info "Manual ASN Routing Defense (Skipped by user)."
 fi
 
-# Robust parsing: checks if USE_SPAMHAUS_ASN is set to 'y'
-SPAMHAUS_ENABLED=$(grep -E "^USE_SPAMHAUS_ASN=" /etc/syswarden/syswarden.conf 2>/dev/null | cut -d'=' -f2 | tr -d '"' | tr -d "'" | tr -d ' ' || true)
-if [[ "$SPAMHAUS_ENABLED" == "y" ]]; then
+# --- Verify Spamhaus Dynamic Feed ---
+if [[ "${USE_SPAMHAUS_ASN:-n}" == "y" || "${USE_SPAMHAUS_ASN:-n}" == "Y" ]]; then
     TOTAL=$((TOTAL + 1))
     pass "Spamhaus Dynamic Feed is actively deployed."
 else
