@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# SysWarden v10.05 - Audit Tool
+# SysWarden v10.06 - Audit Tool
 # Copyright (C) 2026 duggytuxy - Laurent M.
 #
 # This program is free software: you can redistribute it and/or modify
@@ -194,15 +194,12 @@ else
 fi
 
 # --- Load Native Configuration ---
-# We source the config file to let Bash natively handle quotes, exports, and variables.
-# This eliminates all grep/cut parsing errors.
 if [[ -f "/etc/syswarden.conf" ]]; then
     source "/etc/syswarden.conf" 2>/dev/null || true
 fi
 
 # --- Verify GeoIP Threat Intelligence ---
 if [[ -n "${GEOBLOCK_COUNTRIES:-}" ]]; then
-    TOTAL=$((TOTAL + 1))
     pass "GeoIP Threat Intelligence is actively deployed and enforced."
 else
     info "GeoIP Threat Intelligence (Skipped by user)."
@@ -210,7 +207,6 @@ fi
 
 # --- Verify ASN Routing Threat Intelligence ---
 if [[ -n "${BLOCK_ASNS:-}" ]]; then
-    TOTAL=$((TOTAL + 1))
     pass "Manual ASN Routing Defense is actively deployed."
 else
     info "Manual ASN Routing Defense (Skipped by user)."
@@ -218,7 +214,6 @@ fi
 
 # --- Verify Spamhaus Dynamic Feed ---
 if [[ "${USE_SPAMHAUS_ASN:-n}" == "y" || "${USE_SPAMHAUS_ASN:-n}" == "Y" ]]; then
-    TOTAL=$((TOTAL + 1))
     pass "Spamhaus Dynamic Feed is actively deployed."
 else
     info "Spamhaus Dynamic Feed (Skipped by user)."
@@ -324,7 +319,6 @@ fi
 log_header "Phase 6: Zero Trust Remote Access (VPN & SSH Cloaking)"
 
 # --- Dynamic SSH Port Extraction ---
-# We query active sockets to find the real SSH port instead of assuming port 22
 SSH_PORT=$(ss -tlnp 2>/dev/null | grep sshd | awk '{print $4}' | awk -F':' '{print $NF}' | head -n 1 || echo "")
 if [[ -z "$SSH_PORT" ]]; then
     SSH_PORT=$(netstat -tlnp 2>/dev/null | grep sshd | awk '{print $4}' | awk -F':' '{print $NF}' | head -n 1 || echo "")
@@ -332,8 +326,6 @@ fi
 SSH_PORT=${SSH_PORT:-22}
 
 # --- Check 1: Purple Team - SSH Global Cloaking (The Priority Guillotine) ---
-# Validates that the public SSH port is explicitly dropped BEFORE any whitelist evaluation.
-TOTAL=$((TOTAL + 1))
 CLOAK_PASSED=0
 
 if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld 2>/dev/null; then
@@ -356,23 +348,18 @@ fi
 
 if [[ $CLOAK_PASSED -eq 1 ]]; then
     pass "SSH Cloaking VERIFIED: Port $SSH_PORT is strictly dropped globally (Priority Guillotine)."
-    SCORE=$((SCORE + 1))
 else
     fail "SSH Cloaking FAILED: Port $SSH_PORT is exposed or missing the global drop rule."
 fi
 
 # --- Check 2: WireGuard VPN Gateway ---
 if [[ -d "/etc/wireguard" ]] && [[ -f "/etc/wireguard/wg0.conf" ]]; then
-    TOTAL=$((TOTAL + 1))
-    # The interface is UP natively on the server even if no client is actively connected
     if ip link show wg0 >/dev/null 2>&1; then
         pass "WireGuard interface (wg0) is UP and ready to accept authorized clients."
-        SCORE=$((SCORE + 1))
     else
         fail "WireGuard interface (wg0) is DOWN or missing."
     fi
 
-    TOTAL=$((TOTAL + 1))
     VPN_ALLOW_PASSED=0
 
     if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld 2>/dev/null; then
@@ -395,7 +382,6 @@ if [[ -d "/etc/wireguard" ]] && [[ -f "/etc/wireguard/wg0.conf" ]]; then
 
     if [[ $VPN_ALLOW_PASSED -eq 1 ]]; then
         pass "VPN Gateway VERIFIED: SSH access is explicitly allowed via the WireGuard tunnel."
-        SCORE=$((SCORE + 1))
     else
         fail "VPN Gateway FAILED: Explicit accept rule for WireGuard not found."
     fi
@@ -405,11 +391,9 @@ fi
 
 # --- Check 3: Day-2 Operations (Dynamic SSH Bypass) ---
 if [[ -s "/etc/syswarden/ssh_whitelist.txt" ]]; then
-    TOTAL=$((TOTAL + 1))
     BYPASS_COUNT=$(grep -v '^$' "/etc/syswarden/ssh_whitelist.txt" | wc -l)
     if [[ "$BYPASS_COUNT" -gt 0 ]]; then
         pass "Zero Trust Exception VERIFIED: $BYPASS_COUNT explicit IP(s) are surgically whitelisted for direct SSH access."
-        SCORE=$((SCORE + 1))
     else
         warn "Zero Trust Exception: SSH Whitelist file exists but is empty."
     fi
