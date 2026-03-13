@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# SysWarden v10.03 - Audit Tool
+# SysWarden v10.04 - Audit Tool
 # Copyright (C) 2026 duggytuxy - Laurent M.
 #
 # This program is free software: you can redistribute it and/or modify
@@ -195,7 +195,7 @@ fi
 
 # --- Verify GeoIP Threat Intelligence ---
 # Robust parsing: extracts GEOBLOCK_COUNTRIES and checks if the list is non-empty
-GEO_COUNTRIES=$(grep -E "^GEOBLOCK_COUNTRIES=" /etc/syswarden/syswarden.conf 2>/dev/null | cut -d'=' -f2 | tr -d '"' | tr -d "'")
+GEO_COUNTRIES=$(grep -E "^GEOBLOCK_COUNTRIES=" /etc/syswarden/syswarden.conf 2>/dev/null | cut -d'=' -f2 | tr -d '"' | tr -d "'" || true)
 
 if [[ -n "$GEO_COUNTRIES" ]]; then
     TOTAL=$((TOTAL + 1))
@@ -206,7 +206,7 @@ fi
 
 # --- Verify ASN Routing Threat Intelligence ---
 # Robust parsing: checks if BLOCK_ASNS list is non-empty
-ASN_LIST=$(grep -E "^BLOCK_ASNS=" /etc/syswarden/syswarden.conf 2>/dev/null | cut -d'=' -f2 | tr -d '"' | tr -d "'")
+ASN_LIST=$(grep -E "^BLOCK_ASNS=" /etc/syswarden/syswarden.conf 2>/dev/null | cut -d'=' -f2 | tr -d '"' | tr -d "'" || true)
 if [[ -n "$ASN_LIST" ]]; then
     TOTAL=$((TOTAL + 1))
     pass "Manual ASN Routing Defense is actively deployed."
@@ -215,7 +215,7 @@ else
 fi
 
 # Robust parsing: checks if USE_SPAMHAUS_ASN is set to 'y'
-SPAMHAUS_ENABLED=$(grep -E "^USE_SPAMHAUS_ASN=" /etc/syswarden/syswarden.conf 2>/dev/null | cut -d'=' -f2 | tr -d '"' | tr -d "'" | tr -d ' ')
+SPAMHAUS_ENABLED=$(grep -E "^USE_SPAMHAUS_ASN=" /etc/syswarden/syswarden.conf 2>/dev/null | cut -d'=' -f2 | tr -d '"' | tr -d "'" | tr -d ' ' || true)
 if [[ "$SPAMHAUS_ENABLED" == "y" ]]; then
     TOTAL=$((TOTAL + 1))
     pass "Spamhaus Dynamic Feed is actively deployed."
