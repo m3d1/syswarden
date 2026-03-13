@@ -55,7 +55,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # ==========================================
-  # JOB 3 : SAST & VULNERABILITÉS (Trivy)
+  # JOB 3 : SAST & VULNERABILITIES (Trivy)
   # ==========================================
   sast:
     name: SAST & Vulnerability Scan
@@ -64,14 +64,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # --- Analyse des Vulnérabilités Dépendances/OS (Trivy) ---
+      # --- OS Dependency Vulnerability Analysis (Trivy) ---
       - name: Run Trivy filesystem scan
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: 'fs'
           scan-ref: '.'
           format: 'table'
-          exit-code: '1' # Bloque la CI si une faille critique est trouvée
+          exit-code: '1' # Block the CI if a critical vulnerability is found
           ignore-unfixed: true
           vuln-type: 'os,library'
           severity: 'CRITICAL,HIGH'
