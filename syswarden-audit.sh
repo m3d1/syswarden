@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# SysWarden v1.11 - Audit Tool
+# SysWarden v1.12 - Audit Tool
 # Copyright (C) 2026 duggytuxy - Laurent M.
 #
 # This program is free software: you can redistribute it and/or modify
@@ -474,6 +474,8 @@ if [[ -n "$LISTEN_PORTS" ]]; then
             info "Exposed Port: $PORT/TCP (SSH) - Guarded by Zero Trust VPN Guillotine (Drop policy)."
         elif [[ "$PORT" -eq 80 || "$PORT" -eq 443 ]]; then
             info "Exposed Port: $PORT/TCP (Web) - Guarded by SysWarden Layer 7 LFI/SQLi/Bot Jails."
+        elif [[ "$PORT" -eq 111 ]]; then
+            info "Exposed Port: $PORT/TCP (rpcbind) - Internal RPC service, guarded by default OS Firewall."
         elif [[ "$PORT" -eq 9999 ]]; then
             info "Exposed Port: $PORT/TCP (SysWarden UI) - Guarded by Localhost/VPN binding."
         elif [[ "$PORT" -eq 51820 || "$PORT" -eq "${WG_PORT:-51820}" ]]; then
