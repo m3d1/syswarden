@@ -33,7 +33,7 @@ LOG_FILE="/var/log/syswarden-install.log"
 CONF_FILE="/etc/syswarden.conf"
 SET_NAME="syswarden_blacklist"
 TMP_DIR=$(mktemp -d)
-VERSION="v1.12"
+VERSION="v1.20"
 SYSWARDEN_DIR="/etc/syswarden"
 WHITELIST_FILE="$SYSWARDEN_DIR/whitelist.txt"
 BLOCKLIST_FILE="$SYSWARDEN_DIR/blocklist.txt"
@@ -1106,7 +1106,7 @@ EOF
             # 3. Allow WireGuard UDP port for tunnel establishment
             firewall-cmd --permanent --add-port="${WG_PORT:-51820}/udp" >/dev/null 2>&1 || true
 
-            # --- STRICT ZERO TRUST HIERARCHY (v1.12) - DEBIAN PARITY) ---
+            # --- STRICT ZERO TRUST HIERARCHY (v1.20) - DEBIAN PARITY) ---
 
             # Priority -1000: Highest priority. Allow SSH & Dashboard strictly from VPN.
             firewall-cmd --permanent --add-rich-rule="rule priority='-1000' family='ipv4' source address='${WG_SUBNET}' port port='${SSH_PORT:-22}' protocol='tcp' accept" >/dev/null 2>&1 || true
@@ -3949,7 +3949,7 @@ EOF
 }
 
 # ==============================================================================
-# SYSWARDEN V9.40 - TELEMETRY BACKEND (SERVERLESS - IP REGISTRY UPDATE)
+# SYSWARDEN v1.20 - TELEMETRY BACKEND (SERVERLESS - IP REGISTRY UPDATE)
 # ==============================================================================
 function setup_telemetry_backend() {
     log "INFO" "Installation of the advanced telemetry engine (Backend)..."
@@ -4076,10 +4076,10 @@ else
     echo '{"error": "jq not found"}' > "$TMP_FILE"
 fi
 
-# FIX: Cross-platform owner assignment and relaxed read permissions (644 instead of 600) for the web server
+# FIX: Strict ownership for Nginx web server (Multi-OS support)
 mv -f "$TMP_FILE" "$DATA_FILE"
-chown nobody:nobody "$DATA_FILE" 2>/dev/null || chown nobody "$DATA_FILE" 2>/dev/null || true
-chmod 644 "$DATA_FILE"
+chown www-data:www-data "$DATA_FILE" 2>/dev/null || chown nginx:nginx "$DATA_FILE" 2>/dev/null || true
+chmod 640 "$DATA_FILE"
 EOF
 
     # 2. Make executable
@@ -4100,25 +4100,30 @@ EOF
 }
 
 # ==============================================================================
-# SYSWARDEN v9.40 - UI DASHBOARD GENERATION (EXPANDED REGISTRY)
+# SYSWARDEN v1.20 - NGINX SECURE DASHBOARD (HTTPS / CSP / IP-RESTRICTED)
 # ==============================================================================
 function generate_dashboard() {
-    log "INFO" "Generating the Serverless Dashboard UI (Expanded v1.12)..."
+    log "INFO" "Generating the Nginx-secured Dashboard UI (HTTPS/CSP/IP-Restricted)..."
+
+    # --- 1. PACKAGE MANAGEMENT (Multi-OS) ---
+    if ! command -v nginx >/dev/null || ! command -v openssl >/dev/null; then
+        log "INFO" "Installing Nginx and OpenSSL..."
+        if command -v apt-get >/dev/null; then
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq >/dev/null 2>&1 || true
+            apt-get install -y -qq nginx openssl >/dev/null
+        elif command -v dnf >/dev/null; then
+            dnf install -y -q nginx openssl >/dev/null
+        elif command -v yum >/dev/null; then
+            yum install -y -q nginx openssl >/dev/null
+        fi
+    fi
 
     local UI_DIR="/etc/syswarden/ui"
     mkdir -p "$UI_DIR"
-    # --- FIX: Force read/execute access for the Python web server ---
     chmod 755 "$UI_DIR"
 
-    # --- DYNAMIC BIND IP ---
-    local UI_BIND_IP="127.0.0.1" # Default to Localhost if no VPN
-    if [[ "${USE_WIREGUARD:-n}" == "y" ]]; then
-        local SUBNET_BASE
-        SUBNET_BASE=$(echo "$WG_SUBNET" | cut -d'.' -f1,2,3)
-        UI_BIND_IP="${SUBNET_BASE}.1"
-    fi
-
-    # 1. Generating the HTML file
+    # 2. Generating the HTML file
     cat <<'EOF' >"$UI_DIR/index.html"
 <!DOCTYPE html>
 <html lang="en" class="dark">
@@ -4168,7 +4173,7 @@ function generate_dashboard() {
             <div class="flex justify-between h-16 items-center">
                 <div class="flex items-center gap-3">
                     <div class="w-3 h-3 bg-red-500 rounded-full animate-pulse shadow-[0_0_10px_rgba(239,68,68,0.7)]" id="status-indicator"></div>
-                    <h1 class="text-xl font-bold tracking-tight">SysWarden <span class="text-brand-500">v1.12</span></h1>
+                    <h1 class="text-xl font-bold tracking-tight">SysWarden <span class="text-brand-500">v1.20</span></h1>
                 </div>
                 
                 <div class="flex items-center gap-2 bg-gray-100 dark:bg-dark-900 p-1 rounded-lg border border-gray-200 dark:border-gray-700">
@@ -4484,108 +4489,130 @@ function generate_dashboard() {
 </html>
 EOF
 
-    # --- FIX: Make HTML readable by the Python web server (running as nobody) ---
     chmod 644 "$UI_DIR/index.html"
 
-    # --- SECURITY FIX: SECURE PYTHON HTTP SERVER (HEADERS & VERSION HIDING) ---
-    # Replaces the default python -m http.server to inject strict security headers
-    # and prevent Server version disclosure (Mitigates F11 and F17).
-    local UI_SERVER_BIN="/usr/local/bin/syswarden-ui-server.py"
-    cat <<'EOF' >"$UI_SERVER_BIN"
-#!/usr/bin/env python3
-import http.server
-import socketserver
-import sys
-import os
-import socket
-
-BIND_IP = sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1"
-PORT = 9999
-os.chdir("/etc/syswarden/ui")
-
-class SecureHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
-    server_version = "SysWarden-UI/1.0"
-    sys_version = ""
-
-    def end_headers(self):
-        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline';")
-        self.send_header("X-Frame-Options", "DENY")
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
-        self.send_header("Referrer-Policy", "strict-origin-when-cross-origin")
-        self.send_header("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
-        super().end_headers()
-
-class BulletproofTCPServer(socketserver.TCPServer):
-    # FIX 1: Bypass TIME_WAIT (Error 98 - Address already in use)
-    allow_reuse_address = True 
-    
-    def server_bind(self):
-        try:
-            # FIX 2: Native Kernel IP_FREEBIND (15) allows binding to an IP that doesn't physically exist yet
-            self.socket.setsockopt(socket.IPPROTO_IP, 15, 1)
-        except Exception:
-            pass
-        super().server_bind()
-
-with BulletproofTCPServer((BIND_IP, PORT), SecureHTTPRequestHandler) as httpd:
-    httpd.serve_forever()
-EOF
-    chmod +x "$UI_SERVER_BIN"
-    # --------------------------------------------------------------------------
-
-    # 2. Creation of the Systemd/OpenRC service
-    if command -v systemctl >/dev/null; then
-        # Backend Systemd (Debian, Ubuntu, RHEL)
-        cat <<EOF >/etc/systemd/system/syswarden-ui.service
-[Unit]
-Description=SysWarden Secure Web UI
-After=network.target wg-quick@wg0.service
-
-[Service]
-Type=simple
-# --- FIX: BIND TO VPN IP INDEPENDENTLY OF INTERFACE STATE ---
-IPFreeBind=yes
-# --- SECURITY FIX: PRIVILEGE ESCALATION PREVENTION ---
-DynamicUser=yes
-NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=yes
-PrivateTmp=yes
-# -----------------------------------------------------
-WorkingDirectory=/etc/syswarden/ui
-ExecStart=$UI_SERVER_BIN $UI_BIND_IP
-Restart=on-failure
-
-[Install]
-WantedBy=multi-user.target
-EOF
-        systemctl daemon-reload
-        systemctl enable --now syswarden-ui >/dev/null 2>&1
-    else
-        # Backend OpenRC (Legacy/Fallback)
-        cat <<EOF >/etc/init.d/syswarden-ui
-#!/sbin/openrc-run
-
-name="syswarden-ui"
-description="SysWarden Secure Web UI"
-command="$UI_SERVER_BIN"
-command_args="$UI_BIND_IP"
-command_background="yes"
-command_user="nobody:nobody"
-directory="/etc/syswarden/ui"
-pidfile="/run/\${name}.pid"
-
-depend() {
-    need net
-}
-EOF
-        chmod +x /etc/init.d/syswarden-ui
-        rc-update add syswarden-ui default >/dev/null 2>&1
-        rc-service syswarden-ui start >/dev/null 2>&1 || true
+    # --- 3. DYNAMIC ACCESS CONTROL (Nginx IP Whitelisting) ---
+    local NGINX_ALLOW_RULES=""
+    if [[ -s "$WHITELIST_FILE" ]]; then
+        while IFS= read -r wl_ip; do
+            [[ -z "$wl_ip" ]] || [[ "$wl_ip" =~ ^# ]] && continue
+            NGINX_ALLOW_RULES+="        allow $wl_ip;\n"
+        done <"$WHITELIST_FILE"
     fi
 
-    log "INFO" "Dashboard UI enabled securely at $UI_BIND_IP:9999"
+    # Allow WireGuard Subnet if active
+    if [[ "${USE_WIREGUARD:-n}" == "y" ]]; then
+        NGINX_ALLOW_RULES+="        allow ${WG_SUBNET};\n"
+    fi
+
+    # Fallback to Localhost and Drop the rest
+    NGINX_ALLOW_RULES+="        allow 127.0.0.1;\n"
+    NGINX_ALLOW_RULES+="        deny all;"
+
+    # --- 4. CRYPTOGRAPHY (Self-Signed TLS) ---
+    local SSL_DIR="/etc/syswarden/ssl"
+    mkdir -p "$SSL_DIR"
+    if [[ ! -f "$SSL_DIR/syswarden.crt" ]]; then
+        log "INFO" "Generating Self-Signed RSA 4096 TLS Certificate..."
+        openssl req -x509 -nodes -days 3650 -newkey rsa:4096 \
+            -keyout "$SSL_DIR/syswarden.key" \
+            -out "$SSL_DIR/syswarden.crt" \
+            -subj "/C=BE/ST=Wallonia/L=Ath/O=SysWarden/CN=syswarden-dashboard" 2>/dev/null
+        chmod 600 "$SSL_DIR/syswarden.key"
+    fi
+
+    # --- 5. NGINX VHOST CONFIGURATION (Multi-OS Paths) ---
+    log "INFO" "Configuring Nginx reverse proxy for port 9999..."
+    local NGINX_CONF_DIR="/etc/nginx/conf.d"
+    if [[ -d "/etc/nginx/sites-available" ]]; then
+        NGINX_CONF_DIR="/etc/nginx/sites-available"
+    fi
+
+    cat <<EOF >"$NGINX_CONF_DIR/syswarden-ui.conf"
+server {
+    listen 9999 ssl;
+    http2 on;
+    server_name _;
+
+    # TLS Encryption
+    ssl_certificate $SSL_DIR/syswarden.crt;
+    ssl_certificate_key $SSL_DIR/syswarden.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
+
+    root $UI_DIR;
+    index index.html;
+
+    # --- Security Access Control (Only Admin IP) ---
+$(echo -e "$NGINX_ALLOW_RULES")
+
+    # --- Strict Security Headers (XSS, CSP, IDOR mitigation) ---
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline';" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
+    server_tokens off;
+
+    # Routing
+    location / {
+        try_files \$uri \$uri/ =404;
+    }
+
+    # Block access to hidden files (.git, .env, etc.)
+    location ~ /\. {
+        deny all;
+    }
+}
+EOF
+
+    # Symlink for Debian/Ubuntu environments
+    if [[ -d "/etc/nginx/sites-enabled" ]]; then
+        ln -sf "$NGINX_CONF_DIR/syswarden-ui.conf" "/etc/nginx/sites-enabled/syswarden-ui.conf"
+        # Remove default site to prevent conflicts on fresh installs
+        rm -f /etc/nginx/sites-enabled/default
+    fi
+
+    # --- 6. EXPOSE DASHBOARD PORT NATIVELY (Let Nginx handle the drops) ---
+    log "INFO" "Opening Port 9999 in OS Firewall to enable Nginx routing..."
+    if [[ "$FIREWALL_BACKEND" == "firewalld" ]]; then
+        firewall-cmd --permanent --zone=public --add-port=9999/tcp >/dev/null 2>&1 || true
+        firewall-cmd --zone=public --add-port=9999/tcp >/dev/null 2>&1 || true
+    elif [[ "$FIREWALL_BACKEND" == "ufw" ]]; then
+        ufw allow 9999/tcp >/dev/null 2>&1 || true
+    elif [[ "$FIREWALL_BACKEND" == "iptables" ]]; then
+        if ! iptables -C INPUT -p tcp --dport 9999 -j ACCEPT 2>/dev/null; then
+            iptables -I INPUT 1 -p tcp --dport 9999 -j ACCEPT
+            if command -v netfilter-persistent >/dev/null; then netfilter-persistent save >/dev/null 2>&1 || true; fi
+        fi
+    elif [[ "$FIREWALL_BACKEND" == "nftables" ]]; then
+        if nft list chain inet filter input >/dev/null 2>&1; then
+            if ! nft list chain inet filter input 2>/dev/null | grep -q "tcp dport 9999 accept"; then
+                nft insert rule inet filter input tcp dport 9999 accept 2>/dev/null || true
+            fi
+        fi
+    fi
+
+    # --- 7. DAEMON ORCHESTRATION ---
+    # Cleanup legacy Python server & Systemd unit if upgrading
+    if systemctl is-active --quiet syswarden-ui; then
+        systemctl stop syswarden-ui >/dev/null 2>&1 || true
+        systemctl disable syswarden-ui >/dev/null 2>&1 || true
+        rm -f /etc/systemd/system/syswarden-ui.service /usr/local/bin/syswarden-ui-server.py
+        systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
+
+    # Start or Reload Nginx
+    systemctl enable nginx >/dev/null 2>&1 || true
+    if systemctl is-active --quiet nginx; then
+        systemctl reload nginx >/dev/null 2>&1 || true
+    else
+        systemctl restart nginx >/dev/null 2>&1 || true
+    fi
+
+    log "INFO" "Dashboard UI secured by Nginx at https://<YOUR_IP>:9999"
 }
 
 whitelist_ip() {
@@ -5021,7 +5048,7 @@ fi
 if [[ "$MODE" != "update" ]]; then
     clear
     echo -e "${GREEN}#############################################################"
-    echo -e "#     SysWarden Tool Installer (Universal v1.12)     #"
+    echo -e "#     SysWarden Tool Installer (Universal v1.20)     #"
     echo -e "#############################################################${NC}"
 fi
 
@@ -5057,7 +5084,6 @@ if [[ "$MODE" != "update" ]]; then
     define_docker_integration "$MODE"
     define_geoblocking "$MODE"
     define_asnblocking "$MODE"
-    configure_fail2ban
 fi
 
 # --- FIX 1: THE SOURCE GAP ---
@@ -5091,10 +5117,21 @@ log "INFO" "Applying massive downloaded lists to active firewall..."
 apply_firewall_rules
 # --------------------------------------
 
+# --- DEVSECOPS FIX: DASHBOARD & FAIL2BAN ORCHESTRATION ---
+# 1. Telemetry & Dashboard ALWAYS run (Install & Update) to deploy/update Nginx.
+setup_telemetry_backend
+generate_dashboard
+
+# 2. Configure Fail2ban AFTER Nginx so it natively detects the web logs.
+configure_fail2ban
+# ---------------------------------------------------------
+
+# 3. Show active jails now that Fail2ban is fully aware of all services
 detect_protected_services
 
+# 4. Restart Reporter if active
 if command -v systemctl >/dev/null && systemctl is-active --quiet syswarden-reporter; then
-    systemctl restart syswarden-reporter
+    systemctl restart syswarden-reporter >/dev/null 2>&1 || true
 fi
 
 if [[ "$MODE" != "update" ]]; then
@@ -5103,11 +5140,6 @@ if [[ "$MODE" != "update" ]]; then
     setup_abuse_reporting "$MODE"
     setup_wazuh_agent "$MODE"
     setup_cron_autoupdate "$MODE"
-
-    # --- DASHBOARD MODULE V9.40 ---
-    setup_telemetry_backend
-    generate_dashboard
-    # ------------------------------
 
     echo -e "\n${GREEN}INSTALLATION SUCCESSFUL${NC}"
     echo -e " -> List loaded: $LIST_TYPE"
