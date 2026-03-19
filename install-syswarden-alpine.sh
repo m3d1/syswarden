@@ -42,7 +42,7 @@ LOG_FILE="/var/log/syswarden-install.log"
 CONF_FILE="/etc/syswarden.conf"
 SET_NAME="syswarden_blacklist"
 TMP_DIR=$(mktemp -d)
-VERSION="v1.26"
+VERSION="v1.27"
 SYSWARDEN_DIR="/etc/syswarden"
 WHITELIST_FILE="$SYSWARDEN_DIR/whitelist.txt"
 BLOCKLIST_FILE="$SYSWARDEN_DIR/blocklist.txt"
@@ -116,6 +116,23 @@ detect_os_backend() {
 install_dependencies() {
     log "INFO" "Installing required dependencies..."
 
+    # ==============================================================================
+    # --- DEVSECOPS FIX: STATE TRACKER (Avoid God Mode Uninstall) ---
+    # Record pre-existing critical services so we don't purge them on uninstall.
+    # MUST BE EXECUTED BEFORE ANY APK COMMANDS!
+    # ==============================================================================
+    if [[ ! -f "$CONF_FILE" ]]; then
+        touch "$CONF_FILE"
+        chmod 600 "$CONF_FILE"
+    fi
+    if ! command -v nginx >/dev/null 2>&1; then
+        echo "NGINX_INSTALLED_BY_SYSWARDEN='y'" >>"$CONF_FILE"
+    fi
+    if ! command -v fail2ban-client >/dev/null 2>&1; then
+        echo "FAIL2BAN_INSTALLED_BY_SYSWARDEN='y'" >>"$CONF_FILE"
+    fi
+    # ==============================================================================
+
     local deps="curl python3 py3-requests ipset fail2ban bash coreutils grep gawk sed procps logrotate ncurses whois rsyslog util-linux wireguard-tools libqrencode libqrencode-tools nginx openssl"
 
     if [[ "$FIREWALL_BACKEND" == "nftables" ]]; then
@@ -181,10 +198,20 @@ install_dependencies() {
     chmod 600 /etc/cron.allow
     rm -f /etc/cron.deny
 
-    # 2. Purge non-root users from privileged groups (wheel/adm/sudo)
+    # 2. Backup and Purge non-root users from privileged groups (wheel/adm/sudo)
     # FIX: Alpine natively places 'daemon' in the 'adm' group, triggering the audit fail.
+    # --- DEVSECOPS FIX: OS HARDENING WITH BACKUP (ALPINE) ---
+    mkdir -p "$SYSWARDEN_DIR"
     for grp in wheel adm sudo; do
         if grep -q "^${grp}:" /etc/group 2>/dev/null; then
+            # Backup current members
+            local members
+            members=$(awk -F':' -v g="$grp" '$1==g {print $4}' /etc/group)
+            if [[ -n "$members" && "$members" != "root" ]]; then
+                echo "${grp}:${members}" >>"$SYSWARDEN_DIR/group_backup.txt"
+            fi
+
+            # Purge non-root users using Alpine's delgroup
             for user in $(awk -F':' -v g="$grp" '$1==g {print $4}' /etc/group | tr ',' ' ' 2>/dev/null); do
                 if [[ -n "$user" ]] && [[ "$user" != "root" ]]; then
                     delgroup "$user" "$grp" >/dev/null 2>&1 || true
@@ -193,6 +220,7 @@ install_dependencies() {
             done
         fi
     done
+    # -----------------------------------------------
 
     # 3. Lock down .profile for existing standard users (Prevents SSH Login backdoors)
     for user_dir in /home/*; do
@@ -1085,6 +1113,12 @@ EOF
                 iptables -I DOCKER-USER 1 -m set --match-set "$GEOIP_SET_NAME" src -j DROP
                 iptables -I DOCKER-USER 1 -m set --match-set "$GEOIP_SET_NAME" src -j LOG --log-prefix "[SysWarden-GEO] "
             fi
+
+            # --- DEVSECOPS FIX: STATEFUL DOCKER BYPASS (Priority 0 - Absolute Top) ---
+            # Ensures outbound traffic (like S3 uploads) never times out on the way back.
+            while iptables -D DOCKER-USER -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN 2>/dev/null; do :; done
+            iptables -I DOCKER-USER 1 -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN 2>/dev/null || true
+            # -------------------------------------------------------------------------
 
             /etc/init.d/iptables save >/dev/null 2>&1 || true
             log "INFO" "Docker firewall rules applied successfully."
@@ -3061,14 +3095,24 @@ uninstall_syswarden() {
     echo -e "\n${RED}=== Uninstalling SysWarden (Alpine) ===${NC}"
     log "WARN" "Starting Deep Clean Uninstallation..."
 
-    # --- WIREGUARD CLEANUP (OPENRC) ---
-    if [[ -d "/etc/wireguard" ]] || [[ "${USE_WIREGUARD:-n}" == "y" ]]; then
-        log "INFO" "Stopping and removing WireGuard VPN..."
+    if [[ -f "$CONF_FILE" ]]; then
+        # shellcheck source=/dev/null
+        source "$CONF_FILE"
+    fi
 
+    # --- DEVSECOPS FIX: SURGICAL WIREGUARD CLEANUP (OPENRC) ---
+    if [[ "${USE_WIREGUARD:-n}" == "y" ]]; then
+        log "INFO" "Stopping and removing SysWarden WireGuard VPN..."
         rc-service wg-quick.wg0 stop 2>/dev/null || true
         rc-update del wg-quick.wg0 default 2>/dev/null || true
         rm -f /etc/init.d/wg-quick.wg0
-        rm -rf /etc/wireguard
+
+        # Only remove SysWarden configs, protect user's custom WireGuard tunnels
+        rm -f /etc/wireguard/wg0.conf
+        rm -rf /etc/wireguard/clients
+        if [[ -d /etc/wireguard ]] && [[ -z "$(ls -A /etc/wireguard 2>/dev/null)" ]]; then
+            rmdir /etc/wireguard 2>/dev/null || true
+        fi
 
         rm -f /etc/sysctl.d/99-syswarden-wireguard.conf
         sysctl -p 2>/dev/null || true
@@ -3079,21 +3123,15 @@ uninstall_syswarden() {
             /etc/init.d/iptables save >/dev/null 2>&1 || true
         fi
     fi
-    # ----------------------------------
+    # ----------------------------------------------------------
 
-    if [[ -f "$CONF_FILE" ]]; then
-        # shellcheck source=/dev/null
-        source "$CONF_FILE"
-    fi
-
-    # 1. Stop & Remove Reporter Service
-    log "INFO" "Removing SysWarden Reporter..."
+    # 1. Stop & Remove Reporter & UI Services
+    log "INFO" "Removing SysWarden Reporter & UI Dashboard..."
     rc-service syswarden-reporter stop 2>/dev/null || true
     rc-update del syswarden-reporter default 2>/dev/null || true
     rm -f /etc/init.d/syswarden-reporter /usr/local/bin/syswarden_reporter.py
     rm -rf /var/lib/syswarden
 
-    log "INFO" "Removing UI Dashboard Service & Audit Tools..."
     rc-service syswarden-ui stop 2>/dev/null || true
     rc-update del syswarden-ui default 2>/dev/null || true
     rm -f /etc/init.d/syswarden-ui /usr/local/bin/syswarden-telemetry.sh /usr/local/bin/syswarden-ui-server.py
@@ -3112,51 +3150,100 @@ uninstall_syswarden() {
     # Nftables
     if command -v nft >/dev/null; then
         nft delete table inet syswarden_table 2>/dev/null || true
-        # Clean modular config and remove include from main OS config
         rm -f /etc/syswarden/syswarden.nft
         rm -f /etc/nftables.d/syswarden-os-bypass.nft
         if [[ -f "/etc/nftables.nft" ]]; then
             sed -i '\|include "/etc/syswarden/syswarden.nft"|d' /etc/nftables.nft
             sed -i '/# Added by SysWarden/d' /etc/nftables.nft
         fi
+        # DEVSECOPS FIX: Purge Ghost Rules injected in OS tables (BusyBox awk compatible)
+        local handle
+        handle=$(nft -a list chain inet filter input 2>/dev/null | grep "tcp dport 9999 accept" | awk '{print $NF}' || true)
+        if [[ -n "$handle" ]]; then nft delete rule inet filter input handle "$handle" 2>/dev/null || true; fi
     fi
 
     # Docker (DOCKER-USER chain)
     if command -v iptables >/dev/null && iptables -n -L DOCKER-USER >/dev/null 2>&1; then
-        iptables -D DOCKER-USER -m set --match-set "$SET_NAME" src -j DROP 2>/dev/null || true
-        iptables -D DOCKER-USER -m set --match-set "$SET_NAME" src -j LOG --log-prefix "[SysWarden-DOCKER] " 2>/dev/null || true
-        iptables -D DOCKER-USER -m set --match-set "$GEOIP_SET_NAME" src -j DROP 2>/dev/null || true
-        iptables -D DOCKER-USER -m set --match-set "$GEOIP_SET_NAME" src -j LOG --log-prefix "[SysWarden-GEO] " 2>/dev/null || true
-        iptables -D DOCKER-USER -m set --match-set "$ASN_SET_NAME" src -j DROP 2>/dev/null || true
-        iptables -D DOCKER-USER -m set --match-set "$ASN_SET_NAME" src -j LOG --log-prefix "[SysWarden-ASN] " 2>/dev/null || true
-        /etc/init.d/iptables save >/dev/null 2>&1 || true
+        while iptables -D DOCKER-USER -m set --match-set "$SET_NAME" src -j DROP 2>/dev/null; do :; done
+        while iptables -D DOCKER-USER -m set --match-set "$SET_NAME" src -j LOG --log-prefix "[SysWarden-DOCKER] " 2>/dev/null; do :; done
+        while iptables -D DOCKER-USER -m set --match-set "$GEOIP_SET_NAME" src -j DROP 2>/dev/null; do :; done
+        while iptables -D DOCKER-USER -m set --match-set "$GEOIP_SET_NAME" src -j LOG --log-prefix "[SysWarden-GEO] " 2>/dev/null; do :; done
+        while iptables -D DOCKER-USER -m set --match-set "$ASN_SET_NAME" src -j DROP 2>/dev/null; do :; done
+        while iptables -D DOCKER-USER -m set --match-set "$ASN_SET_NAME" src -j LOG --log-prefix "[SysWarden-ASN] " 2>/dev/null; do :; done
+        while iptables -D DOCKER-USER -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN 2>/dev/null; do :; done
     fi
 
     # IPSet / Iptables (Legacy)
     if command -v ipset >/dev/null; then
+        while iptables -D INPUT -m set --match-set "$SET_NAME" src -j DROP 2>/dev/null; do :; done
+        while iptables -D INPUT -m set --match-set "$GEOIP_SET_NAME" src -j DROP 2>/dev/null; do :; done
+        while iptables -D INPUT -m set --match-set "$ASN_SET_NAME" src -j DROP 2>/dev/null; do :; done
+
         ipset destroy "$SET_NAME" 2>/dev/null || true
         ipset destroy "$GEOIP_SET_NAME" 2>/dev/null || true
         ipset destroy "$ASN_SET_NAME" 2>/dev/null || true
         /etc/init.d/iptables save 2>/dev/null || true
     fi
 
-    # 4. Revert Fail2ban Configuration
-    if [[ -f /etc/fail2ban/jail.local.bak ]]; then
-        log "INFO" "Restoring original Fail2ban configuration..."
-        mv /etc/fail2ban/jail.local.bak /etc/fail2ban/jail.local
-        rc-service fail2ban restart 2>/dev/null || true
-    elif [[ -f /etc/fail2ban/jail.local ]]; then
-        log "INFO" "No backup found. Removing SysWarden jail.local..."
-        rm -f /etc/fail2ban/jail.local
+    # --- DEVSECOPS FIX: DOCKER NETWORK RESURRECTION ---
+    if command -v docker >/dev/null 2>&1 && rc-service docker status 2>/dev/null | grep -q "started"; then
+        log "INFO" "Restarting Docker daemon to rebuild NAT & Masquerade routing..."
+        rc-service docker restart 2>/dev/null || true
+        sleep 3
+    fi
+    # --------------------------------------------------
+
+    # 4. Revert Fail2ban Configuration (State Aware)
+    for filter in nginx-scanner mariadb-auth mongodb-guard syswarden-privesc syswarden-portscan \
+        syswarden-revshell syswarden-aibots syswarden-badbots syswarden-httpflood syswarden-webshell \
+        syswarden-sqli-xss syswarden-secretshunter syswarden-ssrf syswarden-jndi-ssti syswarden-apimapper \
+        syswarden-lfi-advanced syswarden-vaultwarden syswarden-sso syswarden-silent-scanner \
+        syswarden-proxy-abuse syswarden-jenkins syswarden-gitlab syswarden-redis syswarden-rabbitmq \
+        wordpress-auth drupal-auth nextcloud openvpn-custom gitea-custom cockpit-custom proxmox-custom \
+        haproxy-guard phpmyadmin-custom squid-custom dovecot-custom laravel-auth grafana-auth zabbix-auth wireguard; do
+        rm -f "/etc/fail2ban/filter.d/${filter}.conf"
+    done
+    rm -f /etc/fail2ban/fail2ban.local /etc/fail2ban/action.d/syswarden-docker.conf /etc/fail2ban/jail.local
+
+    if [[ "${FAIL2BAN_INSTALLED_BY_SYSWARDEN:-n}" == "y" ]]; then
+        log "INFO" "Purging Fail2ban (installed by SysWarden)..."
+        rc-service fail2ban stop 2>/dev/null || true
+        rc-update del fail2ban default 2>/dev/null || true
+        apk del fail2ban 2>/dev/null || true
+    else
+        log "INFO" "Restoring default Fail2ban configuration..."
+        if [[ -f /etc/fail2ban/jail.local.bak ]]; then
+            mv /etc/fail2ban/jail.local.bak /etc/fail2ban/jail.local
+        else
+            cat >/etc/fail2ban/jail.local <<'EOF'
+[DEFAULT]
+bantime = 1h
+findtime = 10m
+maxretry = 5
+backend = auto
+[sshd]
+enabled = true
+port = ssh
+logpath = /var/log/messages
+backend = auto
+EOF
+        fi
         rc-service fail2ban restart 2>/dev/null || true
     fi
 
-    # Clean custom Fail2ban files
-    rm -f /etc/fail2ban/fail2ban.local
-    rm -f /etc/fail2ban/action.d/syswarden-docker.conf
-    rm -f /etc/fail2ban/filter.d/syswarden-*.conf
+    # 5. Remove Nginx Dashboard (State Aware)
+    if [[ "${NGINX_INSTALLED_BY_SYSWARDEN:-n}" == "y" ]]; then
+        log "INFO" "Purging Nginx (installed by SysWarden)..."
+        rc-service nginx stop 2>/dev/null || true
+        rc-update del nginx default 2>/dev/null || true
+        apk del nginx 2>/dev/null || true
+    else
+        log "INFO" "Removing SysWarden Dashboard UI only..."
+        rm -f /etc/nginx/http.d/syswarden-ui.conf
+        rc-service nginx reload 2>/dev/null || true
+    fi
 
-    # 5. Remove Wazuh Agent (If installed)
+    # 6. Remove Wazuh Agent (If installed)
     if apk info -e wazuh-agent >/dev/null 2>&1; then
         read -p "Do you also want to UNINSTALL the Wazuh Agent? (y/N): " rm_wazuh
         if [[ "$rm_wazuh" =~ ^[Yy]$ ]]; then
@@ -3166,21 +3253,16 @@ uninstall_syswarden() {
             apk del wazuh-agent
             rm -rf /var/ossec
             log "INFO" "Wazuh Agent removed."
-        else
-            log "INFO" "Keeping Wazuh Agent installed."
         fi
     fi
 
-    # --- 5.5 OS & SECURITY REVERT ---
+    # --- 7. OS & SECURITY REVERT ---
     log "INFO" "Reverting OS Hardening & Log Routing..."
-
-    # Revert Rsyslog (Alpine uses auth.log natively, so we only purge kern-firewall)
     if [[ -f /etc/rsyslog.conf ]]; then
         sed -i '/kern-firewall\.log/d' /etc/rsyslog.conf
         rc-service rsyslog restart 2>/dev/null || true
     fi
 
-    # Remove Immutable flags on user profiles
     if command -v chattr >/dev/null; then
         for user_dir in /home/*; do
             if [[ -d "$user_dir" ]]; then
@@ -3191,14 +3273,23 @@ uninstall_syswarden() {
         done
     fi
 
-    # Revert SSH TCP Forwarding
     if [[ -f /etc/ssh/sshd_config ]]; then
         sed -i 's/^[[:space:]]*AllowTcpForwarding[[:space:]]*no/#AllowTcpForwarding yes/' /etc/ssh/sshd_config
         rc-service sshd restart 2>/dev/null || true
     fi
+
+    if [[ -f /etc/cron.allow ]] && [[ "$(cat /etc/cron.allow)" == "root" ]]; then rm -f /etc/cron.allow; fi
+
+    # DEVSECOPS FIX: RESTORE GROUPS (ALPINE ADDGROUP)
+    if [[ -f "$SYSWARDEN_DIR/group_backup.txt" ]]; then
+        while IFS=':' read -r grp members; do
+            for user in $(echo "$members" | tr ',' ' '); do
+                if [[ -n "$user" ]] && id "$user" >/dev/null 2>&1; then addgroup "$user" "$grp" 2>/dev/null || true; fi
+            done
+        done <"$SYSWARDEN_DIR/group_backup.txt"
+    fi
     # --------------------------------
 
-    # 6. Remove Config Files & Logs
     rm -rf "$SYSWARDEN_DIR"
     rm -f "$CONF_FILE"
     rm -f "$LOG_FILE"
@@ -3288,7 +3379,7 @@ setup_wazuh_agent() {
 }
 
 # ==============================================================================
-# SYSWARDEN v1.26 - TELEMETRY BACKEND (SERVERLESS - IP REGISTRY UPDATE)
+# SYSWARDEN v1.27 - TELEMETRY BACKEND (SERVERLESS - IP REGISTRY UPDATE)
 # ==============================================================================
 function setup_telemetry_backend() {
     log "INFO" "Installation of the advanced telemetry engine (Backend)..."
@@ -3452,7 +3543,7 @@ EOF
 }
 
 # ==============================================================================
-# SYSWARDEN v1.26 - NGINX SECURE DASHBOARD (HTTPS / CSP / IP-RESTRICTED)
+# SYSWARDEN v1.27 - NGINX SECURE DASHBOARD (HTTPS / CSP / IP-RESTRICTED)
 # ==============================================================================
 function generate_dashboard() {
     log "INFO" "Generating the Nginx-secured Dashboard UI (HTTPS/CSP/IP-Restricted)..."
@@ -3511,7 +3602,7 @@ function generate_dashboard() {
             <div class="flex justify-between h-16 items-center">
                 <div class="flex items-center gap-3">
                     <div class="w-3 h-3 bg-red-500 rounded-full animate-pulse shadow-[0_0_10px_rgba(239,68,68,0.7)]" id="status-indicator"></div>
-                    <h1 class="text-xl font-bold tracking-tight">SysWarden <span class="text-brand-500">v1.26</span></h1>
+                    <h1 class="text-xl font-bold tracking-tight">SysWarden <span class="text-brand-500">v1.27</span></h1>
                 </div>
                 
                 <div class="flex items-center gap-2 bg-gray-100 dark:bg-dark-900 p-1 rounded-lg border border-gray-200 dark:border-gray-700">
@@ -4425,7 +4516,7 @@ if [[ "$MODE" != "update" ]]; then
         CYAN='\033[0;36m'
         clear
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
-        echo -e "${GREEN}${BOLD}                   SYSWARDEN v1.26 - PRE-FLIGHT CHECKLIST                     ${NC}"
+        echo -e "${GREEN}${BOLD}                   SYSWARDEN v1.27 - PRE-FLIGHT CHECKLIST                     ${NC}"
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
         echo -e "Before proceeding with the deployment, please ensure you have the following"
         echo -e "information ready. If you lack any required data, press [Ctrl+C] to abort,"
