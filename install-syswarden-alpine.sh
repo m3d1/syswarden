@@ -42,7 +42,8 @@ LOG_FILE="/var/log/syswarden-install.log"
 CONF_FILE="/etc/syswarden.conf"
 SET_NAME="syswarden_blacklist"
 TMP_DIR=$(mktemp -d)
-VERSION="v1.31"
+VERSION="v1.40"
+ACTIVE_PORTS=""
 SYSWARDEN_DIR="/etc/syswarden"
 WHITELIST_FILE="$SYSWARDEN_DIR/whitelist.txt"
 BLOCKLIST_FILE="$SYSWARDEN_DIR/blocklist.txt"
@@ -922,7 +923,18 @@ EOF
 
         cat <<EOF >>"$TMP_DIR/syswarden.nft"
 add rule inet syswarden_table input ip saddr @$SET_NAME log prefix "[SysWarden-BLOCK] " drop
-add rule inet syswarden_table input tcp dport { 23, 445, 1433, 3389, 5900 } log prefix "[SysWarden-BLOCK] " drop
+EOF
+
+        # --- ZERO TRUST: DYNAMIC ALLOW & CATCH-ALL DROP ---
+        if [[ -n "$ACTIVE_PORTS" ]] && [[ "$ACTIVE_PORTS" != "none" ]]; then
+            echo "add rule inet syswarden_table input tcp dport { ${SSH_PORT:-22}, $ACTIVE_PORTS } accept" >>"$TMP_DIR/syswarden.nft"
+        else
+            echo "add rule inet syswarden_table input tcp dport ${SSH_PORT:-22} accept" >>"$TMP_DIR/syswarden.nft"
+        fi
+
+        cat <<EOF >>"$TMP_DIR/syswarden.nft"
+# The Catch-All Drop: Any packet reaching this line is unauthorized probing
+add rule inet syswarden_table input log prefix "[SysWarden-BLOCK] [Catch-All] " drop
 EOF
 
         log "INFO" "Populating Nftables sets atomically in chunks (Bypassing memory limits)..."
@@ -1049,8 +1061,6 @@ EOF
         if ! iptables -C INPUT -m set --match-set "$SET_NAME" src -j DROP 2>/dev/null; then
             iptables -I INPUT 1 -m set --match-set "$SET_NAME" src -j DROP
             iptables -I INPUT 1 -m set --match-set "$SET_NAME" src -j LOG --log-prefix "[SysWarden-BLOCK] "
-            iptables -I INPUT 2 -p tcp -m multiport --dports 23,445,1433,3389,5900 -j DROP
-            iptables -I INPUT 2 -p tcp -m multiport --dports 23,445,1433,3389,5900 -j LOG --log-prefix "[SysWarden-BLOCK] "
         fi
 
         # --- ASN INJECTION (Priority 2) ---
@@ -1095,6 +1105,28 @@ EOF
             iptables -I INPUT 1 -i lo -p tcp --dport "${SSH_PORT:-22}" -j ACCEPT
             iptables -I INPUT 1 -p udp --dport "${WG_PORT:-51820}" -j ACCEPT
         fi
+
+        # ==========================================================
+        # >>> INJECTION DU ZERO TRUST (DYNAMIC ALLOW & CATCH-ALL)
+        # ==========================================================
+
+        # 1. Allow discovered ports explicitly (using a loop to bypass multiport limits)
+        iptables -I INPUT 1 -p tcp --dport "${SSH_PORT:-22}" -j ACCEPT
+        if [[ -n "$ACTIVE_PORTS" ]] && [[ "$ACTIVE_PORTS" != "none" ]]; then
+            for port in $(echo "$ACTIVE_PORTS" | tr ',' ' '); do
+                iptables -I INPUT 1 -p tcp --dport "$port" -j ACCEPT
+            done
+        fi
+
+        # 2. The Catch-All Drop (Appended to the VERY END of the INPUT chain)
+        # Clean old catch-all if it exists
+        while iptables -D INPUT -j DROP 2>/dev/null; do :; done
+        while iptables -D INPUT -j LOG --log-prefix "[SysWarden-BLOCK] [Catch-All] " 2>/dev/null; do :; done
+
+        iptables -A INPUT -j LOG --log-prefix "[SysWarden-BLOCK] [Catch-All] "
+        iptables -A INPUT -j DROP
+
+        # ==========================================================
 
         # --- FIX DEVSECOPS: STRICT WHITELIST EVALUATION ---
         if [[ -s "$WHITELIST_FILE" ]]; then
@@ -1179,6 +1211,39 @@ EOF
     fi
 }
 
+discover_active_services() {
+    log "INFO" "Scanning User-Space for actively listening TCP services..."
+    local detected_ports=""
+
+    # We use 'ss' (modern iproute2) to find all active listening TCP ports
+    # Bypassing IPv6 (for now) and local-only (127.0.0.1) binds
+    if command -v ss >/dev/null; then
+        # Awk parses the 4th column (Local Address:Port) and extracts just the port number
+        detected_ports=$(ss -tlnH 2>/dev/null | grep -v '127.0.0.1' | grep -v '::1' | awk '{print $4}' | awk -F':' '{print $NF}' | sort -nu)
+    elif command -v netstat >/dev/null; then
+        # Fallback for older systems using netstat
+        detected_ports=$(netstat -tln 2>/dev/null | grep '^tcp' | grep -v '127.0.0.1' | grep -v '::1' | awk '{print $4}' | awk -F':' '{print $NF}' | sort -nu)
+    fi
+
+    # --- DEVSECOPS FIX: TELNET HONEYPOT FAIL-SAFE ---
+    # telnetd is often managed by inetd/systemd.socket and might not show up as a standard listening daemon.
+    # If the binary exists, we forcefully open port 23 so the Fail2ban honeypot can trap payloads.
+    if command -v telnetd >/dev/null 2>&1 || command -v in.telnetd >/dev/null 2>&1; then
+        detected_ports=$(printf "%s\n23" "$detected_ports" | grep -v '^$' | sort -nu)
+        log "INFO" "Telnet Honeypot binary detected. Force-whitelisting port 23."
+    fi
+    # ------------------------------------------------
+
+    # Format the ports into a comma-separated list for easy firewall injection
+    if [[ -n "$detected_ports" ]]; then
+        ACTIVE_PORTS=$(echo "$detected_ports" | grep -v '^$' | tr '\n' ',' | sed 's/,$//')
+        log "INFO" "Whitelisted active services (TCP): [$ACTIVE_PORTS]"
+    else
+        log "WARN" "No active external services found. Server will be locked down."
+        ACTIVE_PORTS="none"
+    fi
+}
+
 configure_fail2ban() {
     if command -v fail2ban-client >/dev/null; then
         log "INFO" "Generating Fail2ban configuration (Alpine Zero Trust Mode)..."
@@ -1208,7 +1273,7 @@ EOF
         if [[ "$FIREWALL_BACKEND" == "nftables" ]]; then f2b_action="nftables-multiport"; fi
 
         # --- FIX: DYNAMIC FAIL2BAN INFRASTRUCTURE WHITELIST (ANTI SELF-DOS) ---
-        local f2b_ignoreip="127.0.0.1/8 ::1"
+        local f2b_ignoreip="127.0.0.1/8 ::1 fe80::/10"
 
         # 1. Dynamically extract Public IP of the server
         local public_ip
@@ -3480,7 +3545,7 @@ setup_wazuh_agent() {
 }
 
 # ==============================================================================
-# SYSWARDEN v1.31 - TELEMETRY BACKEND (SERVERLESS - IP REGISTRY UPDATE)
+# SYSWARDEN v1.40 - TELEMETRY BACKEND (SERVERLESS - IP REGISTRY UPDATE)
 # ==============================================================================
 function setup_telemetry_backend() {
     log "INFO" "Installation of the advanced telemetry engine (Backend)..."
@@ -3644,7 +3709,7 @@ EOF
 }
 
 # ==============================================================================
-# SYSWARDEN v1.31 - NGINX SECURE DASHBOARD (HTTPS / CSP / IP-RESTRICTED)
+# SYSWARDEN v1.40 - NGINX SECURE DASHBOARD (HTTPS / CSP / IP-RESTRICTED)
 # ==============================================================================
 function generate_dashboard() {
     log "INFO" "Generating the Nginx-secured Dashboard UI (HTTPS/CSP/IP-Restricted)..."
@@ -3703,7 +3768,7 @@ function generate_dashboard() {
             <div class="flex justify-between h-16 items-center">
                 <div class="flex items-center gap-3">
                     <div class="w-3 h-3 bg-red-500 rounded-full animate-pulse shadow-[0_0_10px_rgba(239,68,68,0.7)]" id="status-indicator"></div>
-                    <h1 class="text-xl font-bold tracking-tight">SysWarden <span class="text-brand-500">v1.31</span></h1>
+                    <h1 class="text-xl font-bold tracking-tight">SysWarden <span class="text-brand-500">v1.40</span></h1>
                 </div>
                 
                 <div class="flex items-center gap-2 bg-gray-100 dark:bg-dark-900 p-1 rounded-lg border border-gray-200 dark:border-gray-700">
@@ -4648,7 +4713,7 @@ if [[ "$MODE" != "update" ]]; then
         CYAN='\033[0;36m'
         clear
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
-        echo -e "${GREEN}${BOLD}                   SYSWARDEN v1.31 - PRE-FLIGHT CHECKLIST                     ${NC}"
+        echo -e "${GREEN}${BOLD}                   SYSWARDEN v1.40 - PRE-FLIGHT CHECKLIST                     ${NC}"
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
         echo -e "Before proceeding with the deployment, please ensure you have the following"
         echo -e "information ready. If you lack any required data, press [Ctrl+C] to abort,"
@@ -4716,9 +4781,8 @@ select_mirror "$MODE"
 download_list
 
 # --- FIX 2: THE COLD BOOT INJECTION (FRESH INSTALL ONLY) ---
-# Initialize base chains/sets before downloading massive lists to prevent
-# service dependency crashes (like Fail2ban starting too early).
 if [[ "$MODE" != "update" ]]; then
+    discover_active_services
     apply_firewall_rules
 fi
 
@@ -4727,9 +4791,8 @@ download_asn
 # --------------------------------------
 
 # --- FIX 3: THE POST-DOWNLOAD RELOAD (INSTALL & UPDATE) ---
-# Now that massive lists are downloaded/updated on disk, we ALWAYS reload
-# the firewall to inject the freshest GeoIP, ASN, and Blocklist data.
 log "INFO" "Applying massive downloaded lists to active firewall..."
+discover_active_services
 apply_firewall_rules
 # --------------------------------------
 
