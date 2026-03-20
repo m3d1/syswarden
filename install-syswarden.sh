@@ -33,7 +33,7 @@ LOG_FILE="/var/log/syswarden-install.log"
 CONF_FILE="/etc/syswarden.conf"
 SET_NAME="syswarden_blacklist"
 TMP_DIR=$(mktemp -d)
-VERSION="v1.28"
+VERSION="v1.29"
 SYSWARDEN_DIR="/etc/syswarden"
 WHITELIST_FILE="$SYSWARDEN_DIR/whitelist.txt"
 BLOCKLIST_FILE="$SYSWARDEN_DIR/blocklist.txt"
@@ -1150,7 +1150,7 @@ EOF
             # 3. Allow WireGuard UDP port for tunnel establishment
             firewall-cmd --permanent --add-port="${WG_PORT:-51820}/udp" >/dev/null 2>&1 || true
 
-            # --- STRICT ZERO TRUST HIERARCHY (v1.28) - DEBIAN PARITY) ---
+            # --- STRICT ZERO TRUST HIERARCHY (v1.29) - DEBIAN PARITY) ---
 
             # Priority -1000: Highest priority. Allow SSH & Dashboard strictly from VPN.
             firewall-cmd --permanent --add-rich-rule="rule priority='-1000' family='ipv4' source address='${WG_SUBNET}' port port='${SSH_PORT:-22}' protocol='tcp' accept" >/dev/null 2>&1 || true
@@ -3023,6 +3023,53 @@ bantime  = 48h
 EOF
         fi
 
+        # 46. DYNAMIC DETECTION: TELNET HONEYPOT & IOT BOTNETS (MIRAI/GAFGYT)
+        TELNET_LOG=""
+        # Dynamically aggregate auth and system logs where login/telnetd events are recorded
+        for log_file in "/var/log/auth.log" "/var/log/secure" "/var/log/messages" "/var/log/auth-syswarden.log"; do
+            if [[ -f "$log_file" ]]; then
+                TELNET_LOG="$TELNET_LOG $log_file"
+            fi
+        done
+
+        TELNET_LOG=$(echo "$TELNET_LOG" | xargs)
+
+        # Check if Port 23 is actively listening or if telnetd is installed
+        if [[ -n "$TELNET_LOG" ]] && { command -v telnetd >/dev/null 2>&1 || ss -tlnp 2>/dev/null | grep -qE ':(23)\b'; }; then
+            log "INFO" "Telnet service detected on Port 23. Enabling IoT Botnet Guard."
+
+            # Create Filter for Telnet Brute-force and IoT Botnet probing
+            # Catches:
+            # 1. Raw tcpwrapper/xinetd telnetd connections (excessive probing)
+            # 2. FAILED LOGIN from standard OS /bin/login (which telnetd pipes to)
+            # 3. PAM authentication failures strictly tied to the 'login' service
+            if [[ ! -f "/etc/fail2ban/filter.d/syswarden-telnet.conf" ]]; then
+                cat <<'EOF' >/etc/fail2ban/filter.d/syswarden-telnet.conf
+[Definition]
+failregex = ^.*(?:in\.telnetd|telnetd)(?:\[\d+\])?: connect from (?:::f{4}:)?<HOST>.*\s*$
+            ^.*login(?:\[\d+\])?:\s+FAILED LOGIN.*(?:FROM|from) (?:::f{4}:)?<HOST>.*\s*$
+            ^.*login(?:\[\d+\])?:\s+.*(?:authentication failure|invalid password).*rhost=(?:::f{4}:)?<HOST>.*\s*$
+            ^.*pam_unix\(login:auth\): authentication failure;.*rhost=(?:::f{4}:)?<HOST>.*\s*$
+ignoreregex = 
+EOF
+            fi
+
+            cat <<EOF >>/etc/fail2ban/jail.local
+
+# --- Telnet Honeypot & IoT Botnet Protection (Mirai/Gafgyt) ---
+[syswarden-telnet]
+enabled  = true
+port     = 23,telnet
+filter   = syswarden-telnet
+logpath  = $TELNET_LOG
+backend  = auto
+# Purple Team Policy: Allow 3 attempts to capture the attacker's payload/credentials in logs for Threat Intel, then drop.
+maxretry = 3
+findtime = 10m
+bantime  = 48h
+EOF
+        fi
+
         log "INFO" "Starting Fail2ban service..."
         if command -v systemctl >/dev/null; then
             systemctl enable --now fail2ban >/dev/null 2>&1 || true
@@ -4032,7 +4079,7 @@ EOF
 }
 
 # ==============================================================================
-# SYSWARDEN v1.28 - TELEMETRY BACKEND (SERVERLESS - IP REGISTRY UPDATE)
+# SYSWARDEN v1.29 - TELEMETRY BACKEND (SERVERLESS - IP REGISTRY UPDATE)
 # ==============================================================================
 function setup_telemetry_backend() {
     log "INFO" "Installation of the advanced telemetry engine (Backend)..."
@@ -4197,7 +4244,7 @@ EOF
 }
 
 # ==============================================================================
-# SYSWARDEN v1.28 - NGINX SECURE DASHBOARD (HTTPS / CSP / IP-RESTRICTED)
+# SYSWARDEN v1.29 - NGINX SECURE DASHBOARD (HTTPS / CSP / IP-RESTRICTED)
 # ==============================================================================
 function generate_dashboard() {
     log "INFO" "Generating the Nginx-secured Dashboard UI (HTTPS/CSP/IP-Restricted)..."
@@ -4256,7 +4303,7 @@ function generate_dashboard() {
             <div class="flex justify-between h-16 items-center">
                 <div class="flex items-center gap-3">
                     <div class="w-3 h-3 bg-red-500 rounded-full animate-pulse shadow-[0_0_10px_rgba(239,68,68,0.7)]" id="status-indicator"></div>
-                    <h1 class="text-xl font-bold tracking-tight">SysWarden <span class="text-brand-500">v1.28</span></h1>
+                    <h1 class="text-xl font-bold tracking-tight">SysWarden <span class="text-brand-500">v1.29</span></h1>
                 </div>
                 
                 <div class="flex items-center gap-2 bg-gray-100 dark:bg-dark-900 p-1 rounded-lg border border-gray-200 dark:border-gray-700">
@@ -5260,7 +5307,7 @@ fi
 if [[ "$MODE" != "update" ]]; then
     clear
     echo -e "${GREEN}#############################################################"
-    echo -e "#     SysWarden Tool Installer (Universal v1.28)     #"
+    echo -e "#     SysWarden Tool Installer (Universal v1.29)     #"
     echo -e "#############################################################${NC}"
 fi
 
@@ -5297,7 +5344,7 @@ if [[ "$MODE" != "update" ]]; then
         CYAN='\033[0;36m'
         clear
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
-        echo -e "${GREEN}${BOLD}                   SYSWARDEN v1.28 - PRE-FLIGHT CHECKLIST                     ${NC}"
+        echo -e "${GREEN}${BOLD}                   SYSWARDEN v1.29 - PRE-FLIGHT CHECKLIST                     ${NC}"
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
         echo -e "Before proceeding with the deployment, please ensure you have the following"
         echo -e "information ready. If you lack any required data, press [Ctrl+C] to abort,"
