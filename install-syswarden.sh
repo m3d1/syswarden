@@ -33,7 +33,7 @@ LOG_FILE="/var/log/syswarden-install.log"
 CONF_FILE="/etc/syswarden.conf"
 SET_NAME="syswarden_blacklist"
 TMP_DIR=$(mktemp -d)
-VERSION="v1.41"
+VERSION="v1.42"
 ACTIVE_PORTS=""
 SYSWARDEN_DIR="/etc/syswarden"
 WHITELIST_FILE="$SYSWARDEN_DIR/whitelist.txt"
@@ -1205,7 +1205,7 @@ EOF
             # 3. Allow WireGuard UDP port for tunnel establishment
             firewall-cmd --permanent --add-port="${WG_PORT:-51820}/udp" >/dev/null 2>&1 || true
 
-            # --- STRICT ZERO TRUST HIERARCHY (v1.41) - DEBIAN PARITY) ---
+            # --- STRICT ZERO TRUST HIERARCHY (v1.42) - DEBIAN PARITY) ---
 
             # Priority -1000: Highest priority. Allow SSH & Dashboard strictly from VPN.
             firewall-cmd --permanent --add-rich-rule="rule priority='-1000' family='ipv4' source address='${WG_SUBNET}' port port='${SSH_PORT:-22}' protocol='tcp' accept" >/dev/null 2>&1 || true
@@ -4214,7 +4214,7 @@ EOF
 }
 
 # ==============================================================================
-# SYSWARDEN v1.41 - TELEMETRY BACKEND (SERVERLESS - IP REGISTRY UPDATE)
+# SYSWARDEN v1.42 - TELEMETRY BACKEND (SERVERLESS - IP REGISTRY UPDATE)
 # ==============================================================================
 function setup_telemetry_backend() {
     log "INFO" "Installation of the advanced telemetry engine (Backend)..."
@@ -4379,7 +4379,7 @@ EOF
 }
 
 # ==============================================================================
-# SYSWARDEN v1.41 - NGINX SECURE DASHBOARD (HTTPS / CSP / IP-RESTRICTED)
+# SYSWARDEN v1.42 - NGINX SECURE DASHBOARD (HTTPS / CSP / IP-RESTRICTED)
 # ==============================================================================
 function generate_dashboard() {
     log "INFO" "Generating the Nginx-secured Dashboard UI (HTTPS/CSP/IP-Restricted)..."
@@ -4438,7 +4438,7 @@ function generate_dashboard() {
             <div class="flex justify-between h-16 items-center">
                 <div class="flex items-center gap-3">
                     <div class="w-3 h-3 bg-red-500 rounded-full animate-pulse shadow-[0_0_10px_rgba(239,68,68,0.7)]" id="status-indicator"></div>
-                    <h1 class="text-xl font-bold tracking-tight">SysWarden <span class="text-brand-500">v1.41</span></h1>
+                    <h1 class="text-xl font-bold tracking-tight">SysWarden <span class="text-brand-500">v1.42</span></h1>
                 </div>
                 
                 <div class="flex items-center gap-2 bg-gray-100 dark:bg-dark-900 p-1 rounded-lg border border-gray-200 dark:border-gray-700">
@@ -5442,7 +5442,7 @@ fi
 if [[ "$MODE" != "update" ]]; then
     clear
     echo -e "${GREEN}#############################################################"
-    echo -e "#     SysWarden Tool Installer (Universal v1.41)     #"
+    echo -e "#     SysWarden Tool Installer (Universal v1.42)     #"
     echo -e "#############################################################${NC}"
 fi
 
@@ -5464,9 +5464,12 @@ if [[ "$MODE" == "update" ]] && [[ -f "$CONF_FILE" ]]; then
     source "$CONF_FILE"
 fi
 
+# --- DEVSECOPS FIX: DEPENDENCIES ON UPDATE ---
+# Dependencies MUST be checked during updates to ensure new modules (like pyinotify) are installed.
+install_dependencies
+
 if [[ "$MODE" != "update" ]]; then
     : >"$CONF_FILE"
-    install_dependencies
 
     # --- CRITICAL ARCHITECTURE FIX ---
     # Re-detect backend! DNF might have just installed Firewalld or Nftables (via fail2ban)
@@ -5479,7 +5482,7 @@ if [[ "$MODE" != "update" ]]; then
         CYAN='\033[0;36m'
         clear
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
-        echo -e "${GREEN}${BOLD}                   SYSWARDEN v1.41 - PRE-FLIGHT CHECKLIST                     ${NC}"
+        echo -e "${GREEN}${BOLD}                   SYSWARDEN v1.42 - PRE-FLIGHT CHECKLIST                     ${NC}"
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
         echo -e "Before proceeding with the deployment, please ensure you have the following"
         echo -e "information ready. If you lack any required data, press [Ctrl+C] to abort,"
@@ -5573,7 +5576,13 @@ if command -v systemctl >/dev/null && systemctl is-active --quiet syswarden-repo
 fi
 
 # --- DEVSECOPS FIX: DASHBOARD & FAIL2BAN ORCHESTRATION ---
-# Telemetry & Dashboard ALWAYS run (Install & Update) to deploy/update Nginx and the UI.
+# Telemetry, Dashboard, and Fail2ban ALWAYS run (Install & Update) to deploy new WAF rules.
+# In update mode, configure_fail2ban MUST run to apply new jails and PyInotify optimizations.
+if [[ "$MODE" == "update" ]]; then
+    log "INFO" "Update Mode: Re-applying Fail2ban optimizations (PyInotify)..."
+    configure_fail2ban
+fi
+
 setup_telemetry_backend
 generate_dashboard
 # ---------------------------------------------------------
@@ -5603,5 +5612,5 @@ if [[ "$MODE" != "update" ]]; then
 else
     # Give clear feedback during an update
     echo -e "\n${GREEN}UPDATE SUCCESSFUL${NC}"
-    echo -e " -> SysWarden Engine & Dashboard UI have been updated to the latest version."
+    echo -e " -> SysWarden Engine, Fail2ban Jails, and Dashboard UI have been updated to v1.42."
 fi
