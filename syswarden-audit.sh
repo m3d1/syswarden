@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# SysWarden v1.51 - DevSecOps Audit & Compliance Tool
+# SysWarden v1.52 - DevSecOps Audit & Compliance Tool
 # Copyright (C) 2026 duggytuxy - Laurent M.
 #
 # This program is free software: you can redistribute it and/or modify
@@ -73,7 +73,8 @@ is_service_active() {
     if command -v systemctl >/dev/null 2>&1; then
         systemctl is-active --quiet "$svc"
     elif command -v rc-service >/dev/null 2>&1; then
-        rc-service "$svc" status 2>/dev/null | grep -q "started"
+        # DEVSECOPS FIX: Prevent SIGPIPE crashing the pipeline
+        rc-service "$svc" status 2>/dev/null | grep "started" >/dev/null
     else
         return 1
     fi
@@ -112,26 +113,80 @@ OS_TYPE="Universal"
 if [[ -f /etc/alpine-release ]]; then OS_TYPE="Alpine"; fi
 info "Detected OS Environment: $OS_TYPE"
 
+# --- DEVSECOPS FIX: Load Native Configuration Early ---
+# Loaded here to immediately evaluate the user's OS Hardening choice
+if [[ -f "/etc/syswarden.conf" ]]; then
+    source "/etc/syswarden.conf" 2>/dev/null || true
+fi
+
 # --- 2. OS HARDENING (ANTI-PERSISTENCE) ---
 log_header "Phase 1: OS Hardening & Privilege Separation"
 
-# Validate Crontab Lockdown
-if [[ -f "/etc/cron.allow" ]]; then
-    check_file_perms "/etc/cron.allow" "600" "root"
+# DEVSECOPS FIX: Evaluate if the user skipped OS Hardening on an existing VPS
+if [[ "${APPLY_OS_HARDENING:-n}" == "y" ]]; then
+
+    # Validate Crontab Lockdown
+    if [[ -f "/etc/cron.allow" ]]; then
+        check_file_perms "/etc/cron.allow" "600" "root"
+    else
+        fail "/etc/cron.allow is missing (Crontab not locked down)"
+    fi
+
+    # Audit privileged groups for unauthorized standard users (Humans UID >= 1000)
+    PRIV_USERS=$(awk -F':' '/^(wheel|sudo|adm):/ {print $4}' /etc/group | tr ',' '\n' | grep -v '^$' | grep -v 'root' || true)
+    UNAUTHORIZED_USERS=""
+
+    for u in $PRIV_USERS; do
+        # Extract UID of the user. System users (daemon, bin) have UID < 1000.
+        uid=$(id -u "$u" 2>/dev/null || echo "0")
+        if [[ "$uid" -ge 1000 ]]; then
+            UNAUTHORIZED_USERS="$UNAUTHORIZED_USERS $u"
+        fi
+    done
+
+    if [[ -z "$UNAUTHORIZED_USERS" ]]; then
+        pass "Privileged groups (wheel/sudo/adm) are clean from standard users."
+    else
+        fail "Found standard users in privileged groups:$UNAUTHORIZED_USERS"
+    fi
+
+    # Verify Immutable flags on standard user profiles
+    if command -v lsattr >/dev/null 2>&1; then
+        IMMUTABLE_FAILED=0
+        for user_dir in /home/*; do
+            if [[ -d "$user_dir" ]]; then
+                for profile_file in "$user_dir/.profile" "$user_dir/.bashrc" "$user_dir/.bash_profile"; do
+                    if [[ -f "$profile_file" ]]; then
+                        # DEVSECOPS FIX: Prevent SIGPIPE with grep >/dev/null
+                        if ! lsattr "$profile_file" 2>/dev/null | grep '^\----i' >/dev/null; then
+                            IMMUTABLE_FAILED=1
+                            fail "Immutable flag missing on $profile_file"
+                        fi
+                    fi
+                done
+            fi
+        done
+        if [[ $IMMUTABLE_FAILED -eq 0 ]]; then
+            pass "All existing standard user profiles are immutable (+i)."
+        fi
+    else
+        info "lsattr command not found. Skipping immutable flag check."
+    fi
+
 else
-    fail "/etc/cron.allow is missing (Crontab not locked down)"
+    info "OS Hardening was skipped during installation (Existing Server). Strict compliance bypassed."
 fi
 
-# --- DEVSECOPS FIX: CRON ORCHESTRATION & IDEMPOTENCE (v1.51) ---
+# --- DEVSECOPS FIX: CRON ORCHESTRATION & IDEMPOTENCE (v1.52) ---
 # Scan for legacy update loops that cause ghost processes
 CRON_SAFE=1
 CRON_FOUND=0
 for cron_file in "/etc/crontabs/root" "/etc/cron.d/syswarden-update"; do
     if [[ -f "$cron_file" ]]; then
-        if grep -q "syswarden" "$cron_file"; then
+        if grep "syswarden" "$cron_file" >/dev/null 2>&1; then
             CRON_FOUND=1
             # If the legacy 'update' parameter is found without 'cron-', it's a critical failure
-            if grep -q "\.sh update >" "$cron_file" 2>/dev/null; then
+            if grep "\.sh update >" "$cron_file" >/dev/null 2>&1; then
                 CRON_SAFE=0
             fi
         fi
@@ -148,46 +203,6 @@ else
     warn "Cron Orchestration: No automated SysWarden background jobs found."
 fi
 # ---------------------------------------------------------------
-
-# Audit privileged groups for unauthorized standard users (Humans UID >= 1000)
-PRIV_USERS=$(awk -F':' '/^(wheel|sudo|adm):/ {print $4}' /etc/group | tr ',' '\n' | grep -v '^$' | grep -v 'root' || true)
-UNAUTHORIZED_USERS=""
-
-for u in $PRIV_USERS; do
-    # Extract UID of the user. System users (daemon, bin) have UID < 1000.
-    uid=$(id -u "$u" 2>/dev/null || echo "0")
-    if [[ "$uid" -ge 1000 ]]; then
-        UNAUTHORIZED_USERS="$UNAUTHORIZED_USERS $u"
-    fi
-done
-
-if [[ -z "$UNAUTHORIZED_USERS" ]]; then
-    pass "Privileged groups (wheel/sudo/adm) are clean from standard users."
-else
-    fail "Found standard users in privileged groups:$UNAUTHORIZED_USERS"
-fi
-
-# Verify Immutable flags on standard user profiles
-if command -v lsattr >/dev/null 2>&1; then
-    IMMUTABLE_FAILED=0
-    for user_dir in /home/*; do
-        if [[ -d "$user_dir" ]]; then
-            for profile_file in "$user_dir/.profile" "$user_dir/.bashrc" "$user_dir/.bash_profile"; do
-                if [[ -f "$profile_file" ]]; then
-                    if ! lsattr "$profile_file" 2>/dev/null | grep -q '^\----i'; then
-                        IMMUTABLE_FAILED=1
-                        fail "Immutable flag missing on $profile_file"
-                    fi
-                fi
-            done
-        fi
-    done
-    if [[ $IMMUTABLE_FAILED -eq 0 ]]; then
-        pass "All existing standard user profiles are immutable (+i)."
-    fi
-else
-    info "lsattr command not found. Skipping immutable flag check."
-fi
 
 # --- 3. LOG ISOLATION (ANTI-INJECTION) ---
 log_header "Phase 2: Log Routing & Anti-Injection Verification"
@@ -220,11 +235,6 @@ else
     fail "Global Blocklist is missing or empty."
 fi
 
-# --- Load Native Configuration ---
-if [[ -f "/etc/syswarden.conf" ]]; then
-    source "/etc/syswarden.conf" 2>/dev/null || true
-fi
-
 # --- Verify GeoIP Threat Intelligence ---
 if [[ -n "${GEOBLOCK_COUNTRIES:-}" ]] && [[ "${GEOBLOCK_COUNTRIES:-none}" != "none" ]]; then
     pass "GeoIP Threat Intelligence is actively deployed and enforced."
@@ -252,9 +262,9 @@ if command -v nft >/dev/null && nft list table inet syswarden_table >/dev/null 2
     FW_ENGINE="Nftables"
 elif command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then
     FW_ENGINE="Firewalld"
-elif command -v ufw >/dev/null && ufw status | grep -q "Status: active" && grep -q "syswarden" /etc/ufw/before.rules 2>/dev/null; then
+elif command -v ufw >/dev/null && ufw status | grep "Status: active" >/dev/null 2>&1 && grep "syswarden" /etc/ufw/before.rules >/dev/null 2>&1; then
     FW_ENGINE="UFW"
-elif command -v iptables >/dev/null && iptables -n -L INPUT | grep -q "SysWarden"; then
+elif command -v iptables >/dev/null && iptables -n -L INPUT | grep "SysWarden" >/dev/null 2>&1; then
     FW_ENGINE="Iptables"
 fi
 
@@ -264,32 +274,26 @@ else
     fail "SysWarden firewall rules not found in kernel space."
 fi
 
-# --- Verify Catch-All Drop Policy (v1.51 Zero Trust Architecture) ---
+# --- Verify Catch-All Drop Policy (v1.52 Zero Trust Architecture) ---
 CATCH_ALL_PASSED=0
 if [[ "$FW_ENGINE" == "Nftables" ]]; then
-    # DEVSECOPS FIX: Use -F (Fixed string) to prevent regex bracket escaping errors across GNU grep & BusyBox
-    if nft list chain inet syswarden_table input 2>/dev/null | grep -Fq "[Catch-All]"; then
+    # DEVSECOPS FIX: grep >/dev/null prevents SIGPIPE pipefail crashes
+    if nft list chain inet syswarden_table input 2>/dev/null | grep "Catch-All" >/dev/null; then
         CATCH_ALL_PASSED=1
     fi
 elif [[ "$FW_ENGINE" == "Firewalld" ]]; then
-    # DEVSECOPS FIX: Dynamic default zone validation & Case-insensitive (-i) target check
     DEFAULT_ZONE=$(firewall-cmd --get-default-zone 2>/dev/null || echo "public")
-
-    # Check the active default zone first
-    if firewall-cmd --get-target --zone="$DEFAULT_ZONE" 2>/dev/null | grep -iq "drop"; then
+    if firewall-cmd --get-target --zone="$DEFAULT_ZONE" 2>/dev/null | grep -i "drop" >/dev/null; then
         CATCH_ALL_PASSED=1
-    # Fallback: explicitly check the public zone if the user shifted zones post-installation
-    elif firewall-cmd --get-target --zone=public 2>/dev/null | grep -iq "drop"; then
+    elif firewall-cmd --get-target --zone=public 2>/dev/null | grep -i "drop" >/dev/null; then
         CATCH_ALL_PASSED=1
     fi
 elif [[ "$FW_ENGINE" == "UFW" ]]; then
-    # DEVSECOPS FIX: Case-insensitive check
-    if ufw status verbose 2>/dev/null | grep -iq "deny (incoming"; then
+    if grep 'DEFAULT_INPUT_POLICY="DROP"' /etc/default/ufw >/dev/null 2>&1 || ufw status verbose 2>/dev/null | grep -iE "(deny|refuser|rejeter)" >/dev/null; then
         CATCH_ALL_PASSED=1
     fi
 elif [[ "$FW_ENGINE" == "Iptables" ]]; then
-    # DEVSECOPS FIX: Use -F (Fixed string)
-    if iptables -S INPUT 2>/dev/null | grep -Fq "[Catch-All]"; then
+    if iptables -S INPUT 2>/dev/null | grep "Catch-All" >/dev/null; then
         CATCH_ALL_PASSED=1
     fi
 fi
@@ -300,12 +304,12 @@ else
     fail "Zero Trust Architecture FAILED: Catch-All Drop policy is missing. Run 'install-syswarden update'."
 fi
 
-# --- DEVSECOPS FIX: STATEFUL DOCKER ROUTING AUDIT (v1.51) ---
+# --- DEVSECOPS FIX: STATEFUL DOCKER ROUTING AUDIT (v1.52) ---
 if command -v docker >/dev/null 2>&1 && is_service_active "docker"; then
     if command -v iptables >/dev/null 2>&1 && iptables -n -L DOCKER-USER >/dev/null 2>&1; then
 
         # 1. Verify SysWarden Blocklist Injection
-        if iptables -S DOCKER-USER 2>/dev/null | grep -q "syswarden_blacklist"; then
+        if iptables -S DOCKER-USER 2>/dev/null | grep "syswarden_blacklist" >/dev/null; then
             pass "Docker Integration: SysWarden blocklists are actively shielding containers."
         else
             fail "Docker Integration: SysWarden blocklists are missing from the DOCKER-USER chain."
@@ -339,7 +343,7 @@ if is_service_active "fail2ban"; then
     if fail2ban-client ping >/dev/null 2>&1; then
         pass "Fail2ban socket is highly responsive (Pong)."
 
-        # --- DEVSECOPS FIX: PROCESS IDEMPOTENCE (v1.51) ---
+        # --- DEVSECOPS FIX: PROCESS IDEMPOTENCE (v1.52) ---
         # Count running instances. Using regex bracket trick [f] to exclude the grep process itself safely.
         # wc -l ensures exit code 0 even if no process is found, respecting 'set -e'.
         F2B_PROC_COUNT=$(ps aux | grep "[f]ail2ban-server" | wc -l)
@@ -358,7 +362,7 @@ if is_service_active "fail2ban"; then
         fi
 
         # Audit strict regex anchoring in the core Portscan filter
-        if grep -q "^failregex = \^%(__prefix_line)s" /etc/fail2ban/filter.d/syswarden-portscan.conf 2>/dev/null; then
+        if grep "^failregex = \^%(__prefix_line)s" /etc/fail2ban/filter.d/syswarden-portscan.conf >/dev/null 2>&1; then
             pass "Strict Regex Anchoring is applied (Log Spoofing vector neutralized)."
         else
             fail "Strict Regex Anchoring missing in the portscan filter."
@@ -407,7 +411,7 @@ else
     fail "Telemetry Orchestrator script is missing."
 fi
 
-# --- DEVSECOPS FIX: PROCESS IDEMPOTENCE (v1.51) ---
+# --- DEVSECOPS FIX: PROCESS IDEMPOTENCE (v1.52) ---
 # We force a single numeric value by taking only the first line and removing spaces
 # This prevents the "0 0" or "1 1" error on some distributions
 TELEMETRY_RAW=$(ps aux | grep "[s]yswarden-telemetry.sh" | wc -l || echo 0)
@@ -461,18 +465,18 @@ SSH_PORT=${SSH_PORT:-22}
 
 # --- Check 1: Purple Team - SSH Global Cloaking (The Priority Guillotine) ---
 CLOAK_PASSED=0
-
+# DEVSECOPS FIX: grep >/dev/null prevents SIGPIPE pipefail crashes
 if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld 2>/dev/null; then
-    if firewall-cmd --list-rich-rules 2>/dev/null | grep -q "priority=\"-900\".*port=\"${SSH_PORT}\".*drop"; then
+    if firewall-cmd --list-rich-rules 2>/dev/null | grep "priority=\"-900\".*port=\"${SSH_PORT}\".*drop" >/dev/null; then
         CLOAK_PASSED=1
     fi
 elif command -v nft >/dev/null 2>&1 && nft list table inet syswarden_table >/dev/null 2>&1; then
     NFT_RULES=$(nft -n list chain inet syswarden_table input 2>/dev/null | tr '\n' ' ' | tr '\t' ' ')
-    if echo "$NFT_RULES" | grep -qE "tcp dport ${SSH_PORT}.*drop"; then
+    if echo "$NFT_RULES" | grep -E "tcp dport ${SSH_PORT}.*drop" >/dev/null; then
         CLOAK_PASSED=1
     fi
-elif command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
-    if ufw status 2>/dev/null | grep -qE "^${SSH_PORT}/tcp[[:space:]]+DENY[[:space:]]+Anywhere"; then
+elif command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep "Status: active" >/dev/null; then
+    if ufw status 2>/dev/null | grep -E "^${SSH_PORT}/tcp[[:space:]]+DENY[[:space:]]+Anywhere" >/dev/null; then
         CLOAK_PASSED=1
     fi
 elif command -v iptables >/dev/null 2>&1; then
@@ -500,22 +504,26 @@ if [[ -d "/etc/wireguard" ]] && [[ -f "/etc/wireguard/wg0.conf" ]]; then
     fi
 
     VPN_ALLOW_PASSED=0
-
+    # DEVSECOPS FIX: Use grep >/dev/null
     if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld 2>/dev/null; then
-        if firewall-cmd --list-rich-rules 2>/dev/null | grep -q "priority=\"-1000\".*port=\"${SSH_PORT}\".*accept"; then
+        # Firewalld natively uses the trusted zone for wg0
+        if firewall-cmd --permanent --zone=trusted --list-interfaces 2>/dev/null | grep "wg0" >/dev/null; then
             VPN_ALLOW_PASSED=1
         fi
     elif command -v nft >/dev/null 2>&1 && nft list table inet syswarden_table >/dev/null 2>&1; then
         NFT_RULES=$(nft -n list chain inet syswarden_table input 2>/dev/null | tr '\n' ' ' | tr '\t' ' ')
-        if echo "$NFT_RULES" | grep -qE "iifname.*wg0.*tcp dport ${SSH_PORT}.*accept"; then
+        # Matches the new Global Trust rule: iifname { "lo", "wg0" } accept
+        if echo "$NFT_RULES" | grep -E "iifname.*wg0.*accept" >/dev/null; then
             VPN_ALLOW_PASSED=1
         fi
-    elif command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
-        if ufw status 2>/dev/null | grep -qE "Anywhere[[:space:]]+ALLOW[[:space:]]+10\."; then
+    elif command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep "Status: active" >/dev/null; then
+        # UFW now allows generic traffic on wg0 interface
+        if ufw status 2>/dev/null | grep -E "wg0.*ALLOW" >/dev/null; then
             VPN_ALLOW_PASSED=1
         fi
     elif command -v iptables >/dev/null 2>&1; then
-        if iptables -C INPUT -i wg0 -p tcp --dport "${SSH_PORT}" -j ACCEPT 2>/dev/null; then
+        # Iptables now uses a generic accept for wg0
+        if iptables -S INPUT 2>/dev/null | grep -E "\-A INPUT -i wg0 -j ACCEPT" >/dev/null; then
             VPN_ALLOW_PASSED=1
         fi
     fi
@@ -547,8 +555,9 @@ fi
 log_header "Phase 7: Exposed Services & Firewall Persistence (CSPM)"
 
 # --- 7.1 Firewall Persistence Check (Cold Boot Survivability) ---
+# DEVSECOPS FIX: Use grep >/dev/null instead of grep -q to avoid SIGPIPE
 if [[ "$FW_ENGINE" == "Nftables" ]]; then
-    if grep -q 'include "/etc/syswarden/syswarden.nft"' /etc/nftables.nft 2>/dev/null || grep -q 'include "/etc/syswarden/syswarden.nft"' /etc/nftables.conf 2>/dev/null; then
+    if grep 'include "/etc/syswarden/syswarden.nft"' /etc/nftables.nft >/dev/null 2>&1 || grep 'include "/etc/syswarden/syswarden.nft"' /etc/nftables.conf >/dev/null 2>&1; then
         pass "Firewall Persistence VERIFIED: SysWarden Nftables rules are firmly anchored in main OS config."
     else
         fail "Firewall Persistence FAILED: SysWarden include directive is missing in main Nftables config."
@@ -563,14 +572,14 @@ if [[ "$FW_ENGINE" == "Nftables" ]]; then
     fi
 
 elif [[ "$FW_ENGINE" == "Firewalld" ]]; then
-    if systemctl is-enabled firewalld 2>/dev/null | grep -q "enabled"; then
+    if systemctl is-enabled firewalld 2>/dev/null | grep "enabled" >/dev/null; then
         pass "Firewall Persistence VERIFIED: Firewalld is enabled on boot (Rich Rules are persistent natively)."
     else
         fail "Firewall Persistence FAILED: Firewalld is not enabled on system boot."
     fi
 
 elif [[ "$FW_ENGINE" == "UFW" ]]; then
-    if systemctl is-enabled ufw 2>/dev/null | grep -q "enabled"; then
+    if systemctl is-enabled ufw 2>/dev/null | grep "enabled" >/dev/null; then
         pass "Firewall Persistence VERIFIED: UFW is enabled and will restore rules on boot."
     else
         fail "Firewall Persistence FAILED: UFW is not enabled on system boot."
