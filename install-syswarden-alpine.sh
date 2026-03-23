@@ -42,7 +42,7 @@ LOG_FILE="/var/log/syswarden-install.log"
 CONF_FILE="/etc/syswarden.conf"
 SET_NAME="syswarden_blacklist"
 TMP_DIR=$(mktemp -d)
-VERSION="v1.50"
+VERSION="v1.51"
 ACTIVE_PORTS=""
 SYSWARDEN_DIR="/etc/syswarden"
 WHITELIST_FILE="$SYSWARDEN_DIR/whitelist.txt"
@@ -927,9 +927,9 @@ EOF
 
         # --- ZERO TRUST: DYNAMIC ALLOW & CATCH-ALL DROP ---
         if [[ -n "$ACTIVE_PORTS" ]] && [[ "$ACTIVE_PORTS" != "none" ]]; then
-            echo "add rule inet syswarden_table input tcp dport { ${SSH_PORT:-22}, $ACTIVE_PORTS } accept" >>"$TMP_DIR/syswarden.nft"
+            echo "add rule inet syswarden_table input tcp dport { ${SSH_PORT:-22}, 9999, $ACTIVE_PORTS } accept" >>"$TMP_DIR/syswarden.nft"
         else
-            echo "add rule inet syswarden_table input tcp dport ${SSH_PORT:-22} accept" >>"$TMP_DIR/syswarden.nft"
+            echo "add rule inet syswarden_table input tcp dport { ${SSH_PORT:-22}, 9999 } accept" >>"$TMP_DIR/syswarden.nft"
         fi
 
         cat <<EOF >>"$TMP_DIR/syswarden.nft"
@@ -960,30 +960,6 @@ EOF
         nft -f "$TMP_DIR/syswarden.nft"
         # --------------------------------------------
 
-        # --- FIX: KERNEL FORWARDING & OS-LEVEL BYPASS FOR WIREGUARD ---
-        if [[ "${USE_WIREGUARD:-n}" == "y" ]]; then
-            log "INFO" "Applying WireGuard routing bypass to native OS tables..."
-            if nft list table inet filter >/dev/null 2>&1; then
-                # 1. Open UDP port and allow wg0 interface in OS default input chain
-                if nft list chain inet filter input >/dev/null 2>&1; then
-                    if ! nft list chain inet filter input 2>/dev/null | grep -q "udp dport ${WG_PORT:-51820} accept"; then
-                        nft insert rule inet filter input udp dport "${WG_PORT:-51820}" accept 2>/dev/null || true
-                    fi
-                    if ! nft list chain inet filter input 2>/dev/null | grep -q "iifname \"wg0\" accept"; then
-                        nft insert rule inet filter input iifname "wg0" accept 2>/dev/null || true
-                    fi
-                fi
-                # 2. Allow IP Forwarding for the VPN tunnel (Idempotent)
-                if nft list chain inet filter forward >/dev/null 2>&1; then
-                    if ! nft list chain inet filter forward 2>/dev/null | grep -q "iifname \"wg0\" accept"; then
-                        nft insert rule inet filter forward iifname "wg0" accept 2>/dev/null || true
-                        nft insert rule inet filter forward oifname "wg0" accept 2>/dev/null || true
-                    fi
-                fi
-            fi
-        fi
-        # --------------------------------------------------------------
-
         # --- MODULAR PERSISTENCE (ZERO-TOUCH) ---
         log "INFO" "Saving SysWarden Nftables table to isolated config..."
         mkdir -p /etc/syswarden
@@ -1006,26 +982,35 @@ EOF
             chmod 755 "$MAIN_NFT_CONF"
         fi
 
-        # --- NEW DEVSECOPS FIX: ALPINE NATIVE FIREWALL AUTO-BYPASS ---
+        # --- NEW DEVSECOPS FIX: ALPINE NATIVE FIREWALL AUTO-BYPASS (WITH WIREGUARD) ---
         # Alpine's default inet filter table drops everything.
-        # We dynamically inject a drop-in file to open detected essential ports.
-        log "INFO" "Configuring Native OS Firewall Bypass for active services..."
+        # We dynamically inject a drop-in file to open detected essential ports and VPN.
+        log "INFO" "Configuring Native OS Firewall Bypass for active services & VPN..."
         mkdir -p /etc/nftables.d
 
         local OS_BYPASS_FILE="/etc/nftables.d/syswarden-os-bypass.nft"
         echo "table inet filter {" >"$OS_BYPASS_FILE"
+
+        # --- INPUT CHAIN ---
         echo "    chain input {" >>"$OS_BYPASS_FILE"
 
         # 1. Always guarantee SSH and UI Dashboard are allowed in the native table
         echo "        tcp dport { ${SSH_PORT:-22}, 9999 } accept comment \"SysWarden: Auto-allow SSH & UI\"" >>"$OS_BYPASS_FILE"
 
-        # 2. Dynamic Web Server Auto-Detection (Nginx, Apache)
+        # 2. WireGuard Native OS Bypass
+        if [[ "${USE_WIREGUARD:-n}" == "y" ]]; then
+            echo "        udp dport ${WG_PORT:-51820} accept comment \"SysWarden: WireGuard Port\"" >>"$OS_BYPASS_FILE"
+            echo "        iifname \"wg0\" accept comment \"SysWarden: WireGuard Interface\"" >>"$OS_BYPASS_FILE"
+            log "INFO" "OS Bypass: WireGuard (UDP ${WG_PORT:-51820}) integrated into native table."
+        fi
+
+        # 3. Dynamic Web Server Auto-Detection (Nginx, Apache)
         if command -v nginx >/dev/null 2>&1 || command -v apache2 >/dev/null 2>&1 || command -v httpd >/dev/null 2>&1; then
             echo "        tcp dport { 80, 443 } accept comment \"SysWarden: Auto-allow Web Services\"" >>"$OS_BYPASS_FILE"
             log "INFO" "OS Bypass: Automatically opened Web Ports (80, 443) in Alpine's native firewall."
         fi
 
-        # 3. Extra Management Panels (Optional - Proxmox, Cockpit, etc.)
+        # 4. Extra Management Panels (Optional - Proxmox, Cockpit, etc.)
         if ss -tulpn 2>/dev/null | grep -qE ':(8080|8443|9090|8006|3000)\b'; then
             local extra_ports=""
             for p in 8080 8443 9090 8006 3000; do
@@ -1035,8 +1020,16 @@ EOF
             echo "        tcp dport { $extra_ports } accept comment \"SysWarden: Auto-allow Admin Panels\"" >>"$OS_BYPASS_FILE"
             log "INFO" "OS Bypass: Automatically opened Custom Panels ($extra_ports)."
         fi
-
         echo "    }" >>"$OS_BYPASS_FILE"
+
+        # --- FORWARD CHAIN (For WireGuard VPN Routing) ---
+        if [[ "${USE_WIREGUARD:-n}" == "y" ]]; then
+            echo "    chain forward {" >>"$OS_BYPASS_FILE"
+            echo "        iifname \"wg0\" accept comment \"SysWarden: WireGuard Forwarding\"" >>"$OS_BYPASS_FILE"
+            echo "        oifname \"wg0\" accept comment \"SysWarden: WireGuard Forwarding\"" >>"$OS_BYPASS_FILE"
+            echo "    }" >>"$OS_BYPASS_FILE"
+        fi
+
         echo "}" >>"$OS_BYPASS_FILE"
 
         # Apply the bypass directly to the live kernel
@@ -1111,6 +1104,7 @@ EOF
         # ==========================================================
 
         # 1. Allow discovered ports explicitly (using a loop to bypass multiport limits)
+        iptables -I INPUT 1 -p tcp --dport 9999 -j ACCEPT
         iptables -I INPUT 1 -p tcp --dport "${SSH_PORT:-22}" -j ACCEPT
         if [[ -n "$ACTIVE_PORTS" ]] && [[ "$ACTIVE_PORTS" != "none" ]]; then
             for port in $(echo "$ACTIVE_PORTS" | tr ',' ' '); do
@@ -3582,7 +3576,7 @@ setup_wazuh_agent() {
 }
 
 # ==============================================================================
-# SYSWARDEN v1.50 - TELEMETRY BACKEND (SERVERLESS - IP REGISTRY UPDATE)
+# SYSWARDEN v1.51 - TELEMETRY BACKEND (SERVERLESS - IP REGISTRY UPDATE)
 # ==============================================================================
 function setup_telemetry_backend() {
     log "INFO" "Installation of the advanced telemetry engine (Backend)..."
@@ -3746,13 +3740,14 @@ EOF
 }
 
 # ==============================================================================
-# SYSWARDEN v1.50 - NGINX SECURE DASHBOARD (HTTPS / CSP / IP-RESTRICTED)
+# SYSWARDEN v1.51 - NGINX SECURE DASHBOARD (HTTPS / CSP / IP-RESTRICTED)
 # ==============================================================================
 function generate_dashboard() {
     log "INFO" "Generating the Nginx-secured Dashboard UI (HTTPS/CSP/IP-Restricted)..."
 
     local UI_DIR="/etc/syswarden/ui"
     mkdir -p "$UI_DIR"
+    chmod 755 /etc/syswarden
     chmod 755 "$UI_DIR"
 
     # 1. Generating the HTML file
@@ -3805,7 +3800,7 @@ function generate_dashboard() {
             <div class="flex justify-between h-16 items-center">
                 <div class="flex items-center gap-3">
                     <div class="w-3 h-3 bg-red-500 rounded-full animate-pulse shadow-[0_0_10px_rgba(239,68,68,0.7)]" id="status-indicator"></div>
-                    <h1 class="text-xl font-bold tracking-tight">SysWarden <span class="text-brand-500">v1.50</span></h1>
+                    <h1 class="text-xl font-bold tracking-tight">SysWarden <span class="text-brand-500">v1.51</span></h1>
                 </div>
                 
                 <div class="flex items-center gap-2 bg-gray-100 dark:bg-dark-900 p-1 rounded-lg border border-gray-200 dark:border-gray-700">
@@ -4779,7 +4774,7 @@ if [[ "$MODE" != "update" ]]; then
         CYAN='\033[0;36m'
         clear
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
-        echo -e "${GREEN}${BOLD}                   SYSWARDEN v1.50 - PRE-FLIGHT CHECKLIST                     ${NC}"
+        echo -e "${GREEN}${BOLD}                   SYSWARDEN v1.51 - PRE-FLIGHT CHECKLIST                     ${NC}"
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
         echo -e "Before proceeding with the deployment, please ensure you have the following"
         echo -e "information ready. If you lack any required data, press [Ctrl+C] to abort,"
