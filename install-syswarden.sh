@@ -33,7 +33,7 @@ LOG_FILE="/var/log/syswarden-install.log"
 CONF_FILE="/etc/syswarden.conf"
 SET_NAME="syswarden_blacklist"
 TMP_DIR=$(mktemp -d)
-VERSION="v1.53"
+VERSION="v1.54"
 ACTIVE_PORTS=""
 SYSWARDEN_DIR="/etc/syswarden"
 WHITELIST_FILE="$SYSWARDEN_DIR/whitelist.txt"
@@ -1210,7 +1210,7 @@ EOF
             # 3. Allow WireGuard UDP port for tunnel establishment
             firewall-cmd --permanent --add-port="${WG_PORT:-51820}/udp" >/dev/null 2>&1 || true
 
-            # --- STRICT ZERO TRUST HIERARCHY (v1.53) - DEBIAN PARITY) ---
+            # --- STRICT ZERO TRUST HIERARCHY (v1.54) - DEBIAN PARITY) ---
 
             # Priority -1000: Highest priority. Allow SSH & Dashboard strictly from VPN.
             firewall-cmd --permanent --add-rich-rule="rule priority='-1000' family='ipv4' source address='${WG_SUBNET}' port port='${SSH_PORT:-22}' protocol='tcp' accept" >/dev/null 2>&1 || true
@@ -1720,6 +1720,25 @@ EOF
             f2b_action="nftables-multiport"
         elif [[ "$FIREWALL_BACKEND" == "ufw" ]]; then f2b_action="ufw"; fi
 
+        # --- DEVSECOPS FIX: SYSTEMD BACKEND OPTIMIZATION ---
+        local OS_BACKEND="auto"
+        if command -v journalctl >/dev/null 2>&1 && systemctl is-active --quiet systemd-journald 2>/dev/null; then
+            OS_BACKEND="systemd"
+            log "INFO" "Systemd-journald detected. OS-native jails will be optimized for maximum performance."
+        fi
+        # ---------------------------------------------------
+
+        # --- DEVSECOPS FIX: LONG-TERM RECIDIVE FILTER ---
+        if [[ ! -f "/etc/fail2ban/filter.d/syswarden-recidive.conf" ]]; then
+            cat <<'EOF' >/etc/fail2ban/filter.d/syswarden-recidive.conf
+[Definition]
+# Strictly catches Ban events in Fail2ban's own log to identify persistent horizontal movement
+failregex = ^.*(?:fail2ban\.actions|fail2ban\.filter).*\[[a-zA-Z0-9_-]+\] (?:Ban|Found) <HOST>\s*$
+ignoreregex = ^.*(?:fail2ban\.actions|fail2ban\.filter).*\[[a-zA-Z0-9_-]+\] (?:Restore )?(?:Unban|unban) <HOST>\s*$
+EOF
+        fi
+        # ------------------------------------------------
+
         # --- FIX: DYNAMIC FAIL2BAN INFRASTRUCTURE WHITELIST (ANTI SELF-DOS) ---
         local f2b_ignoreip="127.0.0.1/8 ::1 fe80::/10"
 
@@ -1760,13 +1779,26 @@ ignoreip = $f2b_ignoreip
 backend = auto
 banaction = $f2b_action
 
+# --- Persistent Attacker Protection (Recidive) ---
+[syswarden-recidive]
+enabled  = true
+port     = 0:65535
+filter   = syswarden-recidive
+logpath  = /var/log/fail2ban.log
+backend  = auto
+banaction= $f2b_action
+# Policy: 3 bans across ANY jail within 1 week triggers a 1-month absolute drop
+maxretry = 3
+findtime = 1w
+bantime  = 4w
+
 # --- SSH Protection ---
 [sshd]
 enabled = true
 mode = aggressive
 port = ${SSH_PORT:-22}
 logpath = %(sshd_log)s
-backend = systemd
+backend = $OS_BACKEND
 EOF
 
         # 4. DYNAMIC DETECTION: NGINX
@@ -2430,7 +2462,7 @@ enabled = true
 port    = 9090
 filter  = cockpit-custom
 logpath = /var/log/secure
-backend = systemd
+backend = $OS_BACKEND
 maxretry = 3
 bantime  = 24h
 EOF
@@ -2468,7 +2500,7 @@ enabled = true
 port    = 0:65535
 filter  = syswarden-privesc
 logpath = $AUTH_LOG
-backend = auto
+backend = $OS_BACKEND
 maxretry = 3
 bantime  = 24h
 EOF
@@ -2647,7 +2679,7 @@ enabled  = true
 port     = 0:65535
 filter   = syswarden-portscan
 logpath  = $FIREWALL_LOG
-backend  = auto
+backend  = $OS_BACKEND
 maxretry = 3
 findtime = 10m
 bantime  = 24h
@@ -2681,7 +2713,7 @@ enabled  = true
 port     = 0:65535
 filter   = syswarden-auditd
 logpath  = $AUDIT_LOG
-backend  = auto
+backend  = $OS_BACKEND
 maxretry = 3
 bantime  = 24h
 EOF
@@ -3715,7 +3747,9 @@ def monitor_logs():
                     elif "asterisk" in jail: cats.extend(["8", "18"])
                     # 15. Portscan
                     elif "portscan" in jail: cats.extend(["14"])
-                    # 16. Fallback
+                    # 16. Persistent Attacker (Recidive) / Horizontal Movement
+                    elif "recidive" in jail: cats.extend(["14", "15", "18"])
+                    # 17. Fallback
                     else: cats.extend(["15", "18"])
 
                     cats = list(set(cats)) # Deduplicate array before sending
@@ -3826,13 +3860,19 @@ EOF
 
 uninstall_syswarden() {
     echo -e "\n${RED}=== Uninstalling SysWarden ===${NC}"
-    log "WARN" "Starting Deep Clean Uninstallation..."
+    log "WARN" "Starting Deep Clean Uninstallation (Scorched Earth)..."
 
     # Load config to retrieve variables
     if [[ -f "$CONF_FILE" ]]; then
         # shellcheck source=/dev/null
         source "$CONF_FILE"
     fi
+
+    # --- DEVSECOPS FIX: GLOBAL ZOMBIE PROCESS PURGE ---
+    log "INFO" "Terminating all SysWarden background processes..."
+    pkill -9 -f syswarden-telemetry 2>/dev/null || true
+    pkill -9 -f syswarden 2>/dev/null || true
+    # --------------------------------------------------
 
     # 1. Stop & Remove Reporter Service
     log "INFO" "Removing SysWarden Reporter..."
@@ -3895,12 +3935,16 @@ uninstall_syswarden() {
     log "INFO" "Removing Maintenance Tasks..."
     rm -f "/etc/cron.d/syswarden-update"
     rm -f "/etc/logrotate.d/syswarden"
+    # Edge case cleanup for crontabs
+    if [[ -f /etc/crontabs/root ]]; then sed -i '/syswarden/d' /etc/crontabs/root 2>/dev/null || true; fi
 
     # 3. Clean Firewall Rules
     log "INFO" "Cleaning Firewall Rules..."
 
     if command -v nft >/dev/null; then
         nft delete table inet syswarden_table 2>/dev/null || true
+        # DEVSECOPS FIX: Purge WG NAT table left by PostUp
+        nft delete table inet syswarden_wg 2>/dev/null || true
         rm -f /etc/syswarden/syswarden.nft
         if [[ -f "/etc/nftables.conf" ]]; then
             sed -i '\|include "/etc/syswarden/syswarden.nft"|d' /etc/nftables.conf
@@ -3979,7 +4023,6 @@ uninstall_syswarden() {
 
     # 1. Stop services first to release file locks
     systemctl stop fail2ban syswarden-ui syswarden-reporter 2>/dev/null || true
-    pkill -9 -f syswarden-telemetry 2>/dev/null || true
 
     # 2. Destroy the SQLite database (The CPU/History Killer)
     rm -f /var/lib/fail2ban/fail2ban.sqlite3
@@ -3996,7 +4039,7 @@ uninstall_syswarden() {
     # A future re-installation would parse these old logs and resurrect ghost IPs.
 
     # 1. Surgically scrub plaintext files (Alma/RHEL heavily uses /var/log/messages)
-    for os_log in "/var/log/messages" "/var/log/syslog" "/var/log/daemon.log" "/var/log/kern-firewall.log"; do
+    for os_log in "/var/log/messages" "/var/log/syslog" "/var/log/daemon.log"; do
         if [[ -f "$os_log" ]]; then
             sed -i '/\] Ban /d' "$os_log" 2>/dev/null || true
             sed -i '/\] Restore Ban /d' "$os_log" 2>/dev/null || true
@@ -4020,7 +4063,7 @@ uninstall_syswarden() {
     for filter in nginx-scanner mariadb-auth mongodb-guard syswarden-privesc syswarden-portscan \
         syswarden-revshell syswarden-aibots syswarden-badbots syswarden-httpflood syswarden-webshell \
         syswarden-sqli-xss syswarden-secretshunter syswarden-ssrf syswarden-jndi-ssti syswarden-apimapper \
-        syswarden-lfi-advanced syswarden-vaultwarden syswarden-sso syswarden-silent-scanner \
+        syswarden-lfi-advanced syswarden-vaultwarden syswarden-sso syswarden-silent-scanner syswarden-recidive \
         syswarden-proxy-abuse syswarden-jenkins syswarden-gitlab syswarden-redis syswarden-rabbitmq \
         wordpress-auth drupal-auth nextcloud openvpn-custom gitea-custom cockpit-custom proxmox-custom \
         haproxy-guard phpmyadmin-custom squid-custom dovecot-custom laravel-auth grafana-auth zabbix-auth wireguard; do
@@ -4089,6 +4132,11 @@ EOF
         if command -v systemctl >/dev/null; then systemctl restart rsyslog 2>/dev/null || true; fi
     fi
 
+    # --- DEVSECOPS FIX: PURGE PHYSICAL ISOLATED LOGS ---
+    rm -f /var/log/kern-firewall.log 2>/dev/null || true
+    rm -f /var/log/auth-syswarden.log 2>/dev/null || true
+    # --------------------------------------------------
+
     if command -v chattr >/dev/null; then
         for user_dir in /home/*; do
             if [[ -d "$user_dir" ]]; then
@@ -4116,11 +4164,15 @@ EOF
     fi
     # --------------------------------
 
+    # --- DEVSECOPS FIX: ABSOLUTE FILE SYSTEM SCORCHED EARTH ---
     rm -rf "$SYSWARDEN_DIR"
     rm -f "$LOG_FILE"
+    rm -f /etc/syswarden.conf
+    rm -f /usr/local/bin/syswarden*
+    # ----------------------------------------------------------
 
     log "INFO" "Cleanup complete."
-    echo -e "${GREEN}Uninstallation complete.${NC}"
+    echo -e "${GREEN}Uninstallation complete (Scorched Earth).${NC}"
     echo -e "${YELLOW}[i] A reboot is recommended to ensure all network routes are completely flushed.${NC}"
     exit 0
 }
@@ -4282,7 +4334,7 @@ EOF
 }
 
 # ==============================================================================
-# SYSWARDEN v1.53 - TELEMETRY BACKEND (SERVERLESS - IP REGISTRY UPDATE)
+# SYSWARDEN v1.54 - TELEMETRY BACKEND (SERVERLESS - IP REGISTRY UPDATE)
 # ==============================================================================
 function setup_telemetry_backend() {
     log "INFO" "Installation of the advanced telemetry engine (Backend)..."
@@ -4447,7 +4499,7 @@ EOF
 }
 
 # ==============================================================================
-# SYSWARDEN v1.53 - NGINX SECURE DASHBOARD (HTTPS / CSP / IP-RESTRICTED)
+# SYSWARDEN v1.54 - NGINX SECURE DASHBOARD (HTTPS / CSP / IP-RESTRICTED)
 # ==============================================================================
 function generate_dashboard() {
     log "INFO" "Generating the Nginx-secured Dashboard UI (HTTPS/CSP/IP-Restricted)..."
@@ -4509,7 +4561,7 @@ function generate_dashboard() {
             <div class="flex justify-between h-16 items-center">
                 <div class="flex items-center gap-3">
                     <div class="w-3 h-3 bg-red-500 rounded-full animate-pulse shadow-[0_0_10px_rgba(239,68,68,0.7)]" id="status-indicator"></div>
-                    <h1 class="text-xl font-bold tracking-tight">SysWarden <span class="text-brand-500">v1.53</span></h1>
+                    <h1 class="text-xl font-bold tracking-tight">SysWarden <span class="text-brand-500">v1.54</span></h1>
                 </div>
                 
                 <div class="flex items-center gap-2 bg-gray-100 dark:bg-dark-900 p-1 rounded-lg border border-gray-200 dark:border-gray-700">
@@ -5554,7 +5606,7 @@ fi
 if [[ "$MODE" != "update" ]]; then
     clear
     echo -e "${GREEN}#############################################################"
-    echo -e "#     SysWarden Tool Installer (Universal v1.53)     #"
+    echo -e "#     SysWarden Tool Installer (Universal v1.54)     #"
     echo -e "#############################################################${NC}"
 fi
 
@@ -5591,7 +5643,7 @@ if [[ "$MODE" != "update" ]]; then
         CYAN='\033[0;36m'
         clear
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
-        echo -e "${GREEN}${BOLD}                   SYSWARDEN v1.53 - PRE-FLIGHT CHECKLIST                     ${NC}"
+        echo -e "${GREEN}${BOLD}                   SYSWARDEN v1.54 - PRE-FLIGHT CHECKLIST                     ${NC}"
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
         echo -e "Before proceeding with the deployment, please ensure you have the following"
         echo -e "information ready. If you lack any required data, press [Ctrl+C] to abort,"

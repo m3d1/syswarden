@@ -2,7 +2,7 @@
 
 # SysWarden Management - Blocklists and Whitelists Manager
 # Copyright (C) 2026 duggytuxy - Laurent M.
-# Version: v1.53
+# Version: v1.54
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
 # the Free Software Foundation, either version 3 of the License, or
@@ -27,7 +27,7 @@ WHITELIST_FILE="$SYSWARDEN_DIR/whitelist.txt"
 BLOCKLIST_FILE="$SYSWARDEN_DIR/blocklist.txt"
 SSH_WHITELIST_FILE="$SYSWARDEN_DIR/ssh_whitelist.txt"
 SET_NAME="syswarden_blacklist"
-VERSION="v1.53"
+VERSION="v1.54"
 
 # --- ROOT ENFORCEMENT ---
 if [[ $EUID -ne 0 ]]; then
@@ -216,8 +216,11 @@ whitelist_ip() {
             nft list table inet syswarden_table >/etc/syswarden/syswarden.nft 2>/dev/null || true
             ;;
         firewalld)
-            firewall-cmd --permanent --add-rich-rule="rule priority='-100' family='ipv4' source address='$target_ip' accept" >/dev/null 2>&1 || true
-            firewall-cmd --add-rich-rule="rule priority='-100' family='ipv4' source address='$target_ip' accept" >/dev/null 2>&1 || true
+            # DEVSECOPS FIX: Dynamic Zone & Absolute Top Priority (-32000) for Whitelist
+            local ACTIVE_ZONE
+            ACTIVE_ZONE=$(firewall-cmd --get-default-zone 2>/dev/null || echo "public")
+            firewall-cmd --permanent --zone="$ACTIVE_ZONE" --add-rich-rule="rule priority='-32000' family='ipv4' source address='$target_ip' accept" >/dev/null 2>&1 || true
+            firewall-cmd --zone="$ACTIVE_ZONE" --add-rich-rule="rule priority='-32000' family='ipv4' source address='$target_ip' accept" >/dev/null 2>&1 || true
             ;;
         ufw)
             ufw insert 1 allow from "$target_ip" >/dev/null 2>&1 || true
@@ -249,7 +252,8 @@ whitelist_ip() {
         if ! grep -q "allow $target_ip;" "$nginx_conf"; then
 
             # 2. Surgical Injection: Insert 'allow <IP>;' strictly before the 'deny all;' directive
-            sed -i "/deny all;/i \        allow $target_ip;" "$nginx_conf"
+            # DEVSECOPS FIX: Handle variable spacing/tabs safely for OpenRC/Systemd parity
+            sed -i -e "/^[[:space:]]*deny all;/i \        allow $target_ip;" "$nginx_conf"
 
             # 3. Safety Check: Validate Nginx syntax before reloading to prevent web server crash
             if command -v nginx >/dev/null && nginx -t >/dev/null 2>&1; then
@@ -315,8 +319,11 @@ allow_ssh_ip() {
             nft list table inet syswarden_table >/etc/syswarden/syswarden.nft 2>/dev/null || true
             ;;
         firewalld)
-            firewall-cmd --permanent --add-rich-rule="rule priority='-1000' family='ipv4' source address='$target_ip' port port='$SSH_PORT' protocol='tcp' accept" >/dev/null 2>&1 || true
-            firewall-cmd --add-rich-rule="rule priority='-1000' family='ipv4' source address='$target_ip' port port='$SSH_PORT' protocol='tcp' accept" >/dev/null 2>&1 || true
+            # DEVSECOPS FIX: Dynamic Zone detection for SSH Hot-Bypass
+            local ACTIVE_ZONE
+            ACTIVE_ZONE=$(firewall-cmd --get-default-zone 2>/dev/null || echo "public")
+            firewall-cmd --permanent --zone="$ACTIVE_ZONE" --add-rich-rule="rule priority='-1000' family='ipv4' source address='$target_ip' port port='$SSH_PORT' protocol='tcp' accept" >/dev/null 2>&1 || true
+            firewall-cmd --zone="$ACTIVE_ZONE" --add-rich-rule="rule priority='-1000' family='ipv4' source address='$target_ip' port port='$SSH_PORT' protocol='tcp' accept" >/dev/null 2>&1 || true
             ;;
         ufw)
             ufw insert 1 allow from "$target_ip" to any port "$SSH_PORT" proto tcp >/dev/null 2>&1 || true
@@ -369,15 +376,19 @@ revoke_ssh_ip() {
     case "$FW_BACKEND" in
         nftables)
             local handle
-            handle=$(nft -a list chain inet syswarden_table input 2>/dev/null | grep "ip saddr $target_ip tcp dport $SSH_PORT accept" | grep -oE 'handle [0-9]+' | awk '{print $2}' | head -n 1)
+            # DEVSECOPS FIX: Bulletproof regex compatible with both Debian and Alpine Nftables output format
+            handle=$(nft -a list chain inet syswarden_table input 2>/dev/null | grep -E "ip saddr $target_ip tcp dport $SSH_PORT accept" | grep -oP 'handle \K[0-9]+' | head -n 1 || true)
             if [[ -n "$handle" ]]; then
                 nft delete rule inet syswarden_table input handle "$handle" 2>/dev/null || true
             fi
             nft list table inet syswarden_table >/etc/syswarden/syswarden.nft 2>/dev/null || true
             ;;
         firewalld)
-            firewall-cmd --permanent --remove-rich-rule="rule priority='-1000' family='ipv4' source address='$target_ip' port port='$SSH_PORT' protocol='tcp' accept" >/dev/null 2>&1 || true
-            firewall-cmd --remove-rich-rule="rule priority='-1000' family='ipv4' source address='$target_ip' port port='$SSH_PORT' protocol='tcp' accept" >/dev/null 2>&1 || true
+            # DEVSECOPS FIX: Dynamic Zone detection for SSH Revocation
+            local ACTIVE_ZONE
+            ACTIVE_ZONE=$(firewall-cmd --get-default-zone 2>/dev/null || echo "public")
+            firewall-cmd --permanent --zone="$ACTIVE_ZONE" --remove-rich-rule="rule priority='-1000' family='ipv4' source address='$target_ip' port port='$SSH_PORT' protocol='tcp' accept" >/dev/null 2>&1 || true
+            firewall-cmd --zone="$ACTIVE_ZONE" --remove-rich-rule="rule priority='-1000' family='ipv4' source address='$target_ip' port port='$SSH_PORT' protocol='tcp' accept" >/dev/null 2>&1 || true
             ;;
         ufw)
             ufw delete allow from "$target_ip" to any port "$SSH_PORT" proto tcp >/dev/null 2>&1 || true
@@ -474,7 +485,7 @@ list_ips() {
 # --- CLI ROUTER & HELP MENU ---
 show_help() {
     echo -e "${GREEN}======================================================${NC}"
-    echo -e "${YELLOW}  SysWarden Management CLI (v1.53) - Day 2 Operations ${NC}"
+    echo -e "${YELLOW}  SysWarden Management CLI (v1.54) - Day 2 Operations ${NC}"
     echo -e "${GREEN}======================================================${NC}"
     echo -e "Usage: syswarden-mng [COMMAND] [IP] [PORT]"
     echo -e ""

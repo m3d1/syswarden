@@ -42,7 +42,7 @@ LOG_FILE="/var/log/syswarden-install.log"
 CONF_FILE="/etc/syswarden.conf"
 SET_NAME="syswarden_blacklist"
 TMP_DIR=$(mktemp -d)
-VERSION="v1.53"
+VERSION="v1.54"
 ACTIVE_PORTS=""
 SYSWARDEN_DIR="/etc/syswarden"
 WHITELIST_FILE="$SYSWARDEN_DIR/whitelist.txt"
@@ -1297,6 +1297,17 @@ EOF
         log "INFO" "Fail2ban infrastructure whitelist enforced: $f2b_ignoreip"
         # ----------------------------------------------------------------------
 
+        # --- DEVSECOPS FIX: LONG-TERM RECIDIVE FILTER ---
+        if [[ ! -f "/etc/fail2ban/filter.d/syswarden-recidive.conf" ]]; then
+            cat <<'EOF' >/etc/fail2ban/filter.d/syswarden-recidive.conf
+[Definition]
+# Strictly catches Ban events in Fail2ban's own log to identify persistent horizontal movement
+failregex = ^.*(?:fail2ban\.actions|fail2ban\.filter).*\[[a-zA-Z0-9_-]+\] (?:Ban|Found) <HOST>\s*$
+ignoreregex = ^.*(?:fail2ban\.actions|fail2ban\.filter).*\[[a-zA-Z0-9_-]+\] (?:Restore )?(?:Unban|unban) <HOST>\s*$
+EOF
+        fi
+        # ------------------------------------------------
+
         # 3. HEADER & SSH (Always Active - Backend MUST be auto for Alpine)
         cat <<EOF >/etc/fail2ban/jail.local
 [DEFAULT]
@@ -1307,6 +1318,19 @@ maxretry = 3
 ignoreip = $f2b_ignoreip
 backend = auto
 banaction = $f2b_action
+
+# --- Persistent Attacker Protection (Recidive) ---
+[syswarden-recidive]
+enabled  = true
+port     = 0:65535
+filter   = syswarden-recidive
+logpath  = /var/log/fail2ban.log
+backend  = auto
+banaction= $f2b_action
+# Policy: 3 bans across ANY jail within 1 week triggers a 1-month absolute drop
+maxretry = 3
+findtime = 1w
+bantime  = 4w
 
 # --- SSH Protection ---
 [sshd]
@@ -2933,7 +2957,9 @@ def monitor_logs():
                         elif "asterisk" in jail: cats.extend(["8", "18"])
                         # 15. Portscan
                         elif "portscan" in jail: cats.extend(["14"])
-                        # 16. Fallback
+                        # 16. Persistent Attacker (Recidive) / Horizontal Movement
+                        elif "recidive" in jail: cats.extend(["14", "15", "18"])
+                        # 17. Fallback
                         else: cats.extend(["15", "18"])
 
                         cats = list(set(cats)) # Deduplicate array
@@ -3319,6 +3345,7 @@ uninstall_syswarden() {
     # Nftables
     if command -v nft >/dev/null; then
         nft delete table inet syswarden_table 2>/dev/null || true
+        nft delete table inet syswarden_wg 2>/dev/null || true
         rm -f /etc/syswarden/syswarden.nft
         rm -f /etc/nftables.d/syswarden-os-bypass.nft
         if [[ -f "/etc/nftables.nft" ]]; then
@@ -3372,6 +3399,7 @@ uninstall_syswarden() {
     rc-service syswarden-telemetry stop 2>/dev/null || true
     pkill -9 fail2ban 2>/dev/null || true
     pkill -9 -f syswarden-telemetry 2>/dev/null || true
+    pkill -9 -f syswarden 2>/dev/null || true
 
     # 2. Destroy the SQLite database
     rm -f /var/lib/fail2ban/fail2ban.sqlite3
@@ -3395,7 +3423,7 @@ uninstall_syswarden() {
     for filter in nginx-scanner mariadb-auth mongodb-guard syswarden-privesc syswarden-portscan \
         syswarden-revshell syswarden-aibots syswarden-badbots syswarden-httpflood syswarden-webshell \
         syswarden-sqli-xss syswarden-secretshunter syswarden-ssrf syswarden-jndi-ssti syswarden-apimapper \
-        syswarden-lfi-advanced syswarden-vaultwarden syswarden-sso syswarden-silent-scanner \
+        syswarden-lfi-advanced syswarden-vaultwarden syswarden-sso syswarden-silent-scanner syswarden-recidive \
         syswarden-proxy-abuse syswarden-jenkins syswarden-gitlab syswarden-redis syswarden-rabbitmq \
         wordpress-auth drupal-auth nextcloud openvpn-custom gitea-custom cockpit-custom proxmox-custom \
         haproxy-guard phpmyadmin-custom squid-custom dovecot-custom laravel-auth grafana-auth zabbix-auth wireguard; do
@@ -3460,6 +3488,12 @@ EOF
         sed -i '/kern-firewall\.log/d' /etc/rsyslog.conf
         rc-service rsyslog restart 2>/dev/null || true
     fi
+
+    # --- DEVSECOPS FIX: PURGE DES LOGS PHYSIQUES ---
+    rm -f /var/log/kern-firewall.log 2>/dev/null || true
+    rm -f /var/log/auth-syswarden.log 2>/dev/null || true
+    rm -f /var/log/syswarden* 2>/dev/null || true
+    # -----------------------------------------------
 
     if command -v chattr >/dev/null; then
         for user_dir in /home/*; do
@@ -3577,7 +3611,7 @@ setup_wazuh_agent() {
 }
 
 # ==============================================================================
-# SYSWARDEN v1.53 - TELEMETRY BACKEND (SERVERLESS - IP REGISTRY UPDATE)
+# SYSWARDEN v1.54 - TELEMETRY BACKEND (SERVERLESS - IP REGISTRY UPDATE)
 # ==============================================================================
 function setup_telemetry_backend() {
     log "INFO" "Installation of the advanced telemetry engine (Backend)..."
@@ -3741,7 +3775,7 @@ EOF
 }
 
 # ==============================================================================
-# SYSWARDEN v1.53 - NGINX SECURE DASHBOARD (HTTPS / CSP / IP-RESTRICTED)
+# SYSWARDEN v1.54 - NGINX SECURE DASHBOARD (HTTPS / CSP / IP-RESTRICTED)
 # ==============================================================================
 function generate_dashboard() {
     log "INFO" "Generating the Nginx-secured Dashboard UI (HTTPS/CSP/IP-Restricted)..."
@@ -3801,7 +3835,7 @@ function generate_dashboard() {
             <div class="flex justify-between h-16 items-center">
                 <div class="flex items-center gap-3">
                     <div class="w-3 h-3 bg-red-500 rounded-full animate-pulse shadow-[0_0_10px_rgba(239,68,68,0.7)]" id="status-indicator"></div>
-                    <h1 class="text-xl font-bold tracking-tight">SysWarden <span class="text-brand-500">v1.53</span></h1>
+                    <h1 class="text-xl font-bold tracking-tight">SysWarden <span class="text-brand-500">v1.54</span></h1>
                 </div>
                 
                 <div class="flex items-center gap-2 bg-gray-100 dark:bg-dark-900 p-1 rounded-lg border border-gray-200 dark:border-gray-700">
@@ -4775,7 +4809,7 @@ if [[ "$MODE" != "update" ]]; then
         CYAN='\033[0;36m'
         clear
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
-        echo -e "${GREEN}${BOLD}                   SYSWARDEN v1.53 - PRE-FLIGHT CHECKLIST                     ${NC}"
+        echo -e "${GREEN}${BOLD}                   SYSWARDEN v1.54 - PRE-FLIGHT CHECKLIST                     ${NC}"
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
         echo -e "Before proceeding with the deployment, please ensure you have the following"
         echo -e "information ready. If you lack any required data, press [Ctrl+C] to abort,"
