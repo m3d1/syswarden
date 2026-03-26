@@ -38,12 +38,9 @@ TOTAL=0
 
 # --- SECURE AUDIT LOGGING ---
 AUDIT_LOG="/var/log/syswarden-audit.log"
-
-# --- DEVSECOPS FIX: Atomic secure file creation (Anti-TOCTOU) ---
-# Create the file within a subshell using a strict umask to prevent local eavesdropping
-(umask 077 && touch "$AUDIT_LOG")
+# Secure the log file immediately (Prevent unauthorized reading of the audit results)
+touch "$AUDIT_LOG" && chmod 600 "$AUDIT_LOG"
 echo "=== SYSWARDEN PURPLE TEAM AUDIT STARTED: $(date -u +"%Y-%m-%dT%H:%M:%SZ") ===" >"$AUDIT_LOG"
-# ----------------------------------------------------------------
 
 # --- HELPERS (Dual-Output: Console + Standardized Log) ---
 log_header() {

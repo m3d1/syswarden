@@ -658,11 +658,6 @@ define_geoblocking() {
             read -p "Enter country codes separated by space [Default: ru cn kp ir]: " geo_codes
         fi
 
-        # --- DEVSECOPS FIX: Input validation to prevent Configuration Injection ---
-        # Strip all characters except letters, numbers, and spaces.
-        geo_codes=$(echo "$geo_codes" | tr -cd 'a-zA-Z0-9 ' | xargs)
-        # ------------------------------------------------------------------------
-
         GEOBLOCK_COUNTRIES=${geo_codes:-ru cn kp ir}
         # Force lowercase for the URL
         GEOBLOCK_COUNTRIES=$(echo "$GEOBLOCK_COUNTRIES" | tr '[:upper:]' '[:lower:]')
@@ -702,12 +697,6 @@ define_asnblocking() {
             log "INFO" "Auto Mode: ASN List and Spamhaus preference loaded via env vars."
         else
             read -p "Enter custom ASN numbers separated by space (Leave empty for none): " asn_list
-
-            # --- DEVSECOPS FIX: Input validation to prevent Configuration Injection ---
-            # Allow only letters, numbers, and spaces to prevent shell breakouts.
-            asn_list=$(echo "$asn_list" | tr -cd 'a-zA-Z0-9 ' | xargs)
-            # ------------------------------------------------------------------------
-
             echo -e "${YELLOW}Note: Fetching and resolving the Spamhaus ASN-DROP list can take more than 5 minutes.${NC}"
             read -p "Include Spamhaus ASN-DROP list (Cybercrime Hosters)? (Y/n): " use_spamhaus
         fi
@@ -826,12 +815,11 @@ download_list() {
         # --- SECURITY FIX: STRICT CIDR SEMANTIC VALIDATION ---
         # Validates exact octet ranges (0-255) and subnet masks (0-32) to prevent firewall crash (F13)
         tr -d '\r' <"$output_file" | awk -F'[/.]' 'NF==4 || NF==5 {
-            valid=1; 
-            for(i=1;i<=4;i++) if($i !~ /^[0-9]+$/ || $i<0 || $i>255 || $i=="") valid=0;
-            if(NF==5 && ($5 !~ /^[0-9]+$/ || $5<0 || $5>32 || $5=="")) valid=0;
+            valid=1; for(i=1;i<=4;i++) if($i<0 || $i>255 || $i=="") valid=0;
+            if(NF==5 && ($5<0 || $5>32 || $5=="")) valid=0;
             if(valid) print $0;
-        }' "$output_file" >"$TMP_DIR/clean_list.txt"
-        # -----------------------------------------------------
+        }' >"$TMP_DIR/clean_list.txt"
+        # -----------------------------------------------------ist.txt"
         FINAL_LIST="$TMP_DIR/clean_list.txt"
         log "INFO" "Download success."
     else
@@ -870,9 +858,8 @@ download_geoip() {
         # Ensure valid CIDR formats and remove duplicates
         # --- SECURITY FIX: STRICT CIDR SEMANTIC VALIDATION ---
         awk -F'[/.]' 'NF==4 || NF==5 {
-            valid=1; 
-            for(i=1;i<=4;i++) if($i !~ /^[0-9]+$/ || $i<0 || $i>255 || $i=="") valid=0;
-            if(NF==5 && ($5 !~ /^[0-9]+$/ || $5<0 || $5>32 || $5=="")) valid=0;
+            valid=1; for(i=1;i<=4;i++) if($i<0 || $i>255 || $i=="") valid=0;
+            if(NF==5 && ($5<0 || $5>32 || $5=="")) valid=0;
             if(valid) print $0;
         }' "$TMP_DIR/geoip_raw.txt" | sort -u >"$GEOIP_FILE"
         # -----------------------------------------------------
