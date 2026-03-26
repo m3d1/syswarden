@@ -36,14 +36,6 @@
 
 # SysWarden
 
-<div align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="./banner-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="./banner-light.svg">
-    <img alt="SysWarden Banner" src="./banner-dark.svg" width="100%">
-  </picture>
-</div>
-
 SysWarden is an enterprise-grade, open-source firewall orchestrator designed to eliminate 99% of noisy, disruptive, and malicious internet traffic. Built around the [Data-Shield IPv4 Blocklists community](https://github.com/duggytuxy/Data-Shield_IPv4_Blocklist), it dynamically integrates GeoIP filtering, [Spamhaus ASN blocking](https://www.spamhaus.org/drop/asndrop.json), and [Fail2ban](https://github.com/fail2ban/fail2ban) intrusion prevention. > Engineered for modern infrastructure, SysWarden provides hermetic Docker protection, automated [AbuseIPDB](https://www.abuseipdb.com/) reporting, and deploys a stealth [WireGuard](https://www.wireguard.com/) management VPN—all operating natively within the Linux kernel to guarantee maximum security with near-zero RAM consumption.
 
 ## What Does SysWarden Protect?
