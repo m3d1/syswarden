@@ -42,7 +42,7 @@ LOG_FILE="/var/log/syswarden-install.log"
 CONF_FILE="/etc/syswarden.conf"
 SET_NAME="syswarden_blacklist"
 TMP_DIR=$(mktemp -d)
-VERSION="v1.67"
+VERSION="v1.68"
 ACTIVE_PORTS=""
 SYSWARDEN_DIR="/etc/syswarden"
 WHITELIST_FILE="$SYSWARDEN_DIR/whitelist.txt"
@@ -3446,15 +3446,23 @@ EOF
     fi
 
     # 5. Remove Nginx Dashboard (State Aware)
+
+    # --- DEVSECOPS FIX: CLEAN UNINSTALL ---
+    # Remove Nginx virtual host configuration unconditionally
+    log "INFO" "Removing Nginx UI configuration..."
+    rm -f /etc/nginx/http.d/syswarden-ui.conf
+
+    # Reload Nginx gracefully if it is still running
+    if rc-service nginx status 2>/dev/null | grep -q "started"; then
+        rc-service nginx reload >/dev/null 2>&1 || true
+    fi
+    # --------------------------------------
+
     if [[ "${NGINX_INSTALLED_BY_SYSWARDEN:-n}" == "y" ]]; then
         log "INFO" "Purging Nginx (installed by SysWarden)..."
         rc-service nginx stop 2>/dev/null || true
         rc-update del nginx default 2>/dev/null || true
         apk del nginx 2>/dev/null || true
-    else
-        log "INFO" "Removing SysWarden Dashboard UI only..."
-        rm -f /etc/nginx/http.d/syswarden-ui.conf
-        rc-service nginx reload 2>/dev/null || true
     fi
 
     # 6. Remove Wazuh Agent (If installed)
@@ -3599,7 +3607,7 @@ setup_wazuh_agent() {
 }
 
 # ==============================================================================
-# SYSWARDEN v1.67 - TELEMETRY BACKEND (SERVERLESS - IP REGISTRY UPDATE)
+# SYSWARDEN v1.68 - TELEMETRY BACKEND (SERVERLESS - IP REGISTRY UPDATE)
 # ==============================================================================
 function setup_telemetry_backend() {
     log "INFO" "Installation of the advanced telemetry engine (Backend)..."
@@ -3763,7 +3771,7 @@ EOF
 }
 
 # ==============================================================================
-# SYSWARDEN v1.67 - NGINX SECURE DASHBOARD (HTTPS / CSP / LOCAL FONTS / BENTO-DARK)
+# SYSWARDEN v1.68 - NGINX SECURE DASHBOARD (HTTPS / CSP / LOCAL FONTS / BENTO-DARK)
 # ==============================================================================
 function generate_dashboard() {
     log "INFO" "Generating the Nginx-secured Dashboard UI (HTTPS/CSP/Local-Fonts)..."
@@ -3810,12 +3818,12 @@ function generate_dashboard() {
 
         /* Color Variables - Deep Dark Cyberpunk */
         :root {
-            --bg-base: #050507;               /* Ultra deep dark background */
-            --bg-panel: rgba(20, 20, 25, 0.4); /* Glassmorphism base */
-            --bg-panel-hover: rgba(30, 30, 38, 0.6);
+            --bg-base: #030305;               /* Ultra deep dark background */
+            --bg-panel: rgba(18, 18, 22, 0.65); /* Glassmorphism base */
+            --bg-panel-hover: rgba(25, 25, 30, 0.85);
             --text-main: #f8fafc;
             --text-muted: #8b9bb4;
-            --border: rgba(255, 255, 255, 0.08);
+            --border: rgba(255, 255, 255, 0.06);
             --border-highlight: rgba(255, 255, 255, 0.15);
             --brand: #ff003c;                 /* Red Neon */
             --brand-glow: rgba(255, 0, 60, 0.2);
@@ -3830,6 +3838,11 @@ function generate_dashboard() {
         
         body {
             background-color: var(--bg-base); 
+            /* Subtle Cyberpunk Grid Background */
+            background-image: 
+                linear-gradient(rgba(255, 255, 255, 0.015) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(255, 255, 255, 0.015) 1px, transparent 1px);
+            background-size: 30px 30px;
             color: var(--text-main);
             line-height: 1.5;
             min-height: 100vh;
@@ -3839,33 +3852,26 @@ function generate_dashboard() {
 
         /* --- ORBS & HALO EFFECTS (Background) --- */
         body::before, body::after {
-            content: '';
-            position: fixed;
-            border-radius: 50%;
-            filter: blur(100px);
-            z-index: -1;
-            opacity: 0.4;
-            pointer-events: none;
+            content: ''; position: fixed; border-radius: 50%; filter: blur(120px);
+            z-index: -1; opacity: 0.35; pointer-events: none;
         }
         body::before {
-            top: -15%; left: -10%;
-            width: 50vw; height: 50vh;
+            top: -15%; left: -10%; width: 50vw; height: 50vh;
             background: radial-gradient(circle, var(--brand-glow) 0%, transparent 70%);
         }
         body::after {
-            bottom: -20%; right: -10%;
-            width: 60vw; height: 60vh;
+            bottom: -20%; right: -10%; width: 60vw; height: 60vh;
             background: radial-gradient(circle, rgba(0, 216, 255, 0.15) 0%, transparent 70%);
         }
 
-        a { color: var(--brand); text-decoration: none; transition: color 0.2s; }
-        a:hover { color: var(--accent); text-decoration: underline; text-shadow: 0 0 8px var(--accent); }
+        a { color: var(--brand); text-decoration: none; transition: all 0.2s; }
+        a:hover { color: var(--accent); text-shadow: 0 0 8px var(--accent); }
 
-        /* Custom Scrollbar */
-        ::-webkit-scrollbar { width: 8px; }
+        /* Modern Fine Scrollbar */
+        ::-webkit-scrollbar { width: 5px; height: 5px; }
         ::-webkit-scrollbar-track { background: transparent; }
-        ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 8px; }
-        ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+        ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.1); border-radius: 10px; }
+        ::-webkit-scrollbar-thumb:hover { background: var(--accent); box-shadow: 0 0 10px var(--accent); }
 
         /* Typography & Utilities */
         .text-sm { font-size: 0.875rem; }
@@ -3884,7 +3890,7 @@ function generate_dashboard() {
         .flex-between { display: flex; justify-content: space-between; align-items: center; }
 
         /* Layout & Bento Grids */
-        .container { max-width: 1300px; margin: 0 auto; padding: 0 1.5rem; }
+        .container { max-width: 1350px; margin: 0 auto; padding: 0 1.5rem; }
         .grid { display: grid; gap: 1.25rem; }
         .grid-4 { grid-template-columns: repeat(4, 1fr); }
         .grid-3 { grid-template-columns: repeat(3, 1fr); }
@@ -3899,70 +3905,96 @@ function generate_dashboard() {
 
         /* Navbar Glass */
         .navbar { 
-            background: rgba(5, 5, 7, 0.7); 
-            backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+            background: rgba(3, 3, 5, 0.75); 
+            backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px);
             border-bottom: 1px solid var(--border); 
             padding: 1.25rem 0; 
             position: sticky; top: 0; z-index: 100;
-        }
-        
-        .status-dot {
-            width: 10px; height: 10px; border-radius: 50%; background: var(--brand);
-            box-shadow: 0 0 12px var(--brand); animation: pulse 2s infinite;
+            box-shadow: 0 10px 30px -10px rgba(0,0,0,0.5);
         }
 
         /* Bento Panels */
         .panel { 
-            background: var(--bg-panel); 
+            position: relative;
+            background: linear-gradient(145deg, var(--bg-panel) 0%, rgba(10, 10, 12, 0.8) 100%);
             backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
             border: 1px solid var(--border); 
             border-radius: 16px; 
-            padding: 1.5rem; 
+            padding: 2.2rem 1.5rem 1.5rem 1.5rem; /* Extra top padding for Mac dots */
             transition: all 0.3s ease;
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
         }
-        .panel:hover { border-color: var(--border-highlight); background: var(--bg-panel-hover); }
+        .panel:hover { border-color: var(--border-highlight); background: var(--bg-panel-hover); transform: translateY(-2px); box-shadow: 0 12px 40px 0 rgba(0, 0, 0, 0.4); }
         
+        /* --- MAC TERMINAL DOTS --- */
+        .panel::before {
+            content: '';
+            position: absolute;
+            top: 14px;
+            left: 16px;
+            width: 9px; height: 9px;
+            border-radius: 50%;
+            background: #ff5f56; /* Red */
+            box-shadow: 16px 0 0 #ffbd2e, 32px 0 0 #27c93f; /* Yellow & Green */
+            opacity: 0.3;
+            transition: opacity 0.3s ease;
+        }
+        .panel:hover::before { opacity: 0.9; }
+
         .panel-title { 
             font-size: 0.75rem; font-weight: bold; text-transform: uppercase; 
             letter-spacing: 0.1em; color: var(--text-muted); margin-bottom: 0.5rem; 
         }
-        .panel-val { font-size: 1.5rem; font-weight: bold; }
-        .val-huge { font-size: 4rem; font-weight: bold; color: var(--brand); line-height: 1; text-shadow: 0 0 20px var(--brand-glow); }
+        .panel-val { font-size: 1.6rem; font-weight: bold; text-shadow: 0 2px 4px rgba(0,0,0,0.5); }
+        .val-huge { font-size: 4.5rem; font-weight: bold; color: var(--brand); line-height: 1; text-shadow: 0 0 24px var(--brand-glow); }
         
         .panel-highlight { 
             border-color: rgba(255, 0, 60, 0.3); 
-            box-shadow: inset 0 0 40px rgba(255, 0, 60, 0.05); 
-            position: relative; overflow: hidden; 
+            box-shadow: inset 0 0 60px rgba(255, 0, 60, 0.05), 0 8px 32px 0 rgba(0, 0, 0, 0.3); 
         }
 
         /* Lists & Data */
-        .list-container { display: flex; flex-direction: column; gap: 0.5rem; }
+        .list-container { display: flex; flex-direction: column; gap: 0.6rem; }
         .list-item {
             display: flex; justify-content: space-between; align-items: center;
-            background: rgba(0, 0, 0, 0.3); padding: 0.75rem 1rem;
+            background: rgba(0, 0, 0, 0.4); padding: 0.85rem 1rem;
             border-radius: 12px; border: 1px solid var(--border); font-size: 0.85rem;
-            transition: border-color 0.2s;
+            transition: all 0.2s;
         }
-        .list-item-hover:hover { border-color: var(--border-highlight); background: rgba(255, 255, 255, 0.03); }
+        .list-item-hover:hover { border-color: var(--accent); background: rgba(0, 216, 255, 0.03); transform: translateX(4px); box-shadow: -4px 0 10px rgba(0, 216, 255, 0.05); }
         .rank { color: var(--text-muted); font-weight: bold; width: 1.75rem; display: inline-block; }
         
-        .tag-red { background: rgba(255, 0, 60, 0.1); color: var(--brand); padding: 2px 10px; border-radius: 12px; font-weight: bold; font-size: 0.7rem; border: 1px solid rgba(255,0,60,0.2); }
-        .tag-green { background: rgba(0, 255, 136, 0.05); color: var(--success); padding: 2px 10px; border-radius: 12px; font-weight: bold; font-size: 0.7rem; text-transform: uppercase; border: 1px solid rgba(0,255,136,0.2); box-shadow: 0 0 8px var(--success-glow); }
+        .tag-red { background: rgba(255, 0, 60, 0.1); color: var(--brand); padding: 3px 10px; border-radius: 12px; font-weight: bold; font-size: 0.7rem; border: 1px solid rgba(255,0,60,0.2); }
+        .tag-green { background: rgba(0, 255, 136, 0.05); color: var(--success); padding: 3px 10px; border-radius: 12px; font-weight: bold; font-size: 0.7rem; text-transform: uppercase; border: 1px solid rgba(0,255,136,0.3); box-shadow: 0 0 10px var(--success-glow); }
 
         .table { width: 100%; border-collapse: separate; border-spacing: 0 0.5rem; font-size: 0.85rem; }
         .table th { text-align: left; padding: 0 0.5rem 0.5rem 0.5rem; color: var(--text-muted); font-weight: normal; border-bottom: 1px solid var(--border); }
-        .table td { padding: 0.75rem 1rem; background: rgba(0, 0, 0, 0.3); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+        .table td { padding: 0.85rem 1rem; background: rgba(0, 0, 0, 0.4); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
         .table tr td:first-child { border-left: 1px solid var(--border); border-top-left-radius: 12px; border-bottom-left-radius: 12px; }
         .table tr td:last-child { border-right: 1px solid var(--border); border-top-right-radius: 12px; border-bottom-right-radius: 12px; }
-        .table tr:hover td { background: rgba(255, 255, 255, 0.03); border-color: var(--border-highlight); }
+        .table tr:hover td { background: rgba(255, 255, 255, 0.03); border-color: var(--border-highlight); color: var(--accent); }
 
-        .scroll-y { max-height: 280px; overflow-y: auto; padding-right: 0.5rem; }
-        .chart-wrapper { position: relative; height: 280px; width: 100%; }
+        .scroll-y { max-height: 290px; overflow-y: auto; padding-right: 0.5rem; }
+        .chart-wrapper { position: relative; height: 280px; width: 100%; margin-top: 10px; }
 
-        @keyframes pulse {
-            0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(255,0,60,0.7); }
-            70% { transform: scale(1.2); box-shadow: 0 0 0 10px rgba(255,0,60,0); }
-            100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(255,0,60,0); }
+        /* --- ANIMATIONS --- */
+        @keyframes pulse-green {
+            0% { box-shadow: 0 0 0 0 rgba(0, 255, 136, 0.7); }
+            70% { box-shadow: 0 0 0 10px rgba(0, 255, 136, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(0, 255, 136, 0); }
+        }
+        @keyframes pulse-red {
+            0% { box-shadow: 0 0 0 0 rgba(255, 0, 60, 0.7); }
+            70% { box-shadow: 0 0 0 10px rgba(255, 0, 60, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(255, 0, 60, 0); }
+        }
+        .status-dot { width: 10px; height: 10px; border-radius: 50%; }
+        .status-up { background-color: var(--success); animation: pulse-green 2s infinite; }
+        .status-down { background-color: var(--brand); animation: pulse-red 2s infinite; }
+        
+        .syswarden-pulse {
+            width: 6px; height: 6px; border-radius: 50%; background: var(--brand);
+            animation: pulse-red 2s infinite; margin-left: 2px; margin-top: 4px;
         }
     </style>
 </head>
@@ -3971,11 +4003,14 @@ function generate_dashboard() {
     <nav class="navbar">
         <div class="container flex-between">
             <div class="flex-align">
-                <div class="status-dot" id="status-indicator"></div>
-                <h1 style="font-size: 1.25rem; font-weight: bold; letter-spacing: -0.05em;">SYSWARDEN <span class="text-brand">v1.67</span></h1>
+                <h1 style="font-size: 1.3rem; font-weight: bold; letter-spacing: -0.05em; display: flex; align-items: flex-start;">
+                    SYSWARDEN&nbsp;<span class="text-brand">v1.68</span>
+                    <div class="syswarden-pulse"></div>
+                </h1>
             </div>
-            <div>
-                <span class="text-xs text-muted uppercase tracking-widest font-bold">Secure Telemetry Active</span>
+            <div class="flex-align">
+                <span class="text-xs uppercase tracking-widest font-bold" id="status-text" style="color: var(--text-muted);">Initializing...</span>
+                <div class="status-dot status-down" id="status-indicator"></div>
             </div>
         </div>
     </nav>
@@ -4080,10 +4115,10 @@ function generate_dashboard() {
                 <h2 class="panel-title mb-4">L7 Banned IP Registry</h2>
                 <div class="scroll-y">
                      <table class="table">
-                        <thead style="position: sticky; top: 0; background: var(--bg-base); z-index: 10;">
+                        <thead style="position: sticky; top: 0; background: rgba(18, 18, 22, 0.85); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); z-index: 10;">
                             <tr>
-                                <th>IP Address</th>
-                                <th style="text-align: right;">Target Jail</th>
+                                <th style="padding-top: 0.5rem;">IP Address</th>
+                                <th style="text-align: right; padding-top: 0.5rem;">Target Jail</th>
                             </tr>
                         </thead>
                         <tbody id="banned-ips-list"></tbody>
@@ -4111,21 +4146,23 @@ function generate_dashboard() {
                 borderColor: '#ff003c',
                 backgroundColor: 'rgba(255, 0, 60, 0.1)',
                 borderWidth: 2,
-                tension: 0.4, // Smoother neon curve
+                tension: 0.4,
                 fill: true,
                 pointRadius: 0,
-                pointHoverRadius: 4,
-                pointHoverBackgroundColor: '#00d8ff'
+                pointHoverRadius: 5,
+                pointHoverBackgroundColor: '#00d8ff',
+                pointHoverBorderColor: '#fff',
+                pointHoverBorderWidth: 2
             }]
         };
         
         try {
             const ctx = document.getElementById('threatChart').getContext('2d');
             
-            // Add gradient for the chart fill
+            // Subtle glowing gradient
             let gradient = ctx.createLinearGradient(0, 0, 0, 300);
-            gradient.addColorStop(0, 'rgba(255, 0, 60, 0.3)');
-            gradient.addColorStop(1, 'rgba(255, 0, 60, 0)');
+            gradient.addColorStop(0, 'rgba(255, 0, 60, 0.35)');
+            gradient.addColorStop(1, 'rgba(255, 0, 60, 0.02)');
             chartData.datasets[0].backgroundColor = gradient;
 
             threatChart = new Chart(ctx, {
@@ -4138,11 +4175,13 @@ function generate_dashboard() {
                     plugins: { 
                         legend: { display: false },
                         tooltip: {
-                            backgroundColor: 'rgba(20, 20, 25, 0.8)',
+                            backgroundColor: 'rgba(10, 10, 15, 0.9)',
                             titleFont: { family: 'JetBrains Mono', size: 13 },
                             bodyFont: { family: 'JetBrains Mono', size: 13 },
-                            borderColor: 'rgba(255, 255, 255, 0.1)',
-                            borderWidth: 1
+                            borderColor: 'rgba(255, 255, 255, 0.15)',
+                            borderWidth: 1,
+                            padding: 12,
+                            displayColors: false
                         }
                     },
                     scales: {
@@ -4152,11 +4191,13 @@ function generate_dashboard() {
                         },
                         y: { 
                             beginAtZero: true, 
-                            grid: { color: 'rgba(255, 255, 255, 0.05)' },
-                            ticks: { font: { family: 'JetBrains Mono' } }
+                            grid: { color: 'rgba(255, 255, 255, 0.05)', borderDash: [5, 5] },
+                            border: { display: false },
+                            ticks: { font: { family: 'JetBrains Mono' }, padding: 10 }
                         }
                     },
-                    animation: { duration: 0 }
+                    animation: { duration: 0 },
+                    interaction: { mode: 'nearest', axis: 'x', intersect: false }
                 }
             });
         } catch (error) {
@@ -4300,7 +4341,7 @@ function generate_dashboard() {
                         bannedIpsEl.appendChild(tr);
                     });
                 } else {
-                    bannedIpsEl.innerHTML = '<tr><td colspan="2" style="text-align: center; padding: 1rem 0;" class="text-xs text-muted italic">Registry is empty.</td></tr>';
+                    bannedIpsEl.innerHTML = '<tr><td colspan="2" style="text-align: center; padding: 1.5rem 0;" class="text-xs text-muted italic">Registry is empty.</td></tr>';
                 }
 
                 // --- DOM UPDATE: Whitelist IPs Registry Grid ---
@@ -4344,16 +4385,23 @@ function generate_dashboard() {
                     threatChart.update();
                 }
 
-                // Update Status UI
+                // Update Status UI (GREEN = UP)
                 document.getElementById('last-update').innerText = timeString;
-                document.getElementById('status-indicator').style.backgroundColor = 'var(--brand)';
-                document.getElementById('status-indicator').style.boxShadow = '0 0 12px var(--brand)';
+                const statusInd = document.getElementById('status-indicator');
+                const statusTxt = document.getElementById('status-text');
+                statusInd.className = 'status-dot status-up';
+                statusTxt.innerText = 'SYSTEM ONLINE';
+                statusTxt.style.color = 'var(--success)';
 
             } catch (error) {
                 console.error("Telemetry Fetch Error:", error);
                 document.getElementById('last-update').innerText = "Offline / Error";
-                document.getElementById('status-indicator').style.backgroundColor = 'var(--text-muted)';
-                document.getElementById('status-indicator').style.boxShadow = 'none';
+                // Update Status UI (RED = DOWN)
+                const statusInd = document.getElementById('status-indicator');
+                const statusTxt = document.getElementById('status-text');
+                statusInd.className = 'status-dot status-down';
+                statusTxt.innerText = 'SYSTEM OFFLINE';
+                statusTxt.style.color = 'var(--brand)';
             }
         }
 
@@ -4931,7 +4979,7 @@ if [[ "$MODE" != "update" ]]; then
         CYAN='\033[0;36m'
         clear
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
-        echo -e "${GREEN}${BOLD}                   SYSWARDEN v1.67 - PRE-FLIGHT CHECKLIST                     ${NC}"
+        echo -e "${GREEN}${BOLD}                   SYSWARDEN v1.68 - PRE-FLIGHT CHECKLIST                     ${NC}"
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
         echo -e "Before proceeding with the deployment, please ensure you have the following"
         echo -e "information ready. If you lack any required data, press [Ctrl+C] to abort,"
