@@ -42,7 +42,7 @@ LOG_FILE="/var/log/syswarden-install.log"
 CONF_FILE="/etc/syswarden.conf"
 SET_NAME="syswarden_blacklist"
 TMP_DIR=$(mktemp -d)
-VERSION="v1.73"
+VERSION="v1.74"
 ACTIVE_PORTS=""
 SYSWARDEN_DIR="/etc/syswarden"
 WHITELIST_FILE="$SYSWARDEN_DIR/whitelist.txt"
@@ -964,26 +964,36 @@ EOF
         mkdir -p /etc/nftables.d
 
         local OS_BYPASS_FILE="/etc/nftables.d/syswarden-os-bypass.nft"
-        echo "table inet filter {" >"$OS_BYPASS_FILE"
-        echo "    chain input {" >>"$OS_BYPASS_FILE"
 
-        # --- DEVSECOPS FIX: THE CATCH-ALL GUILLOTINE & KERNEL SURVIVAL ---
-        # We strictly anchor the native chain to the network stack and enforce the DROP policy
-        echo "        type filter hook input priority filter; policy drop;" >>"$OS_BYPASS_FILE"
-        echo "        ct state established,related accept" >>"$OS_BYPASS_FILE"
-        echo "        iifname \"lo\" accept" >>"$OS_BYPASS_FILE"
-        echo "        ip protocol icmp accept" >>"$OS_BYPASS_FILE"
-        echo "        meta l4proto ipv6-icmp accept" >>"$OS_BYPASS_FILE"
-        # -----------------------------------------------------------------
+        # DEVSECOPS FIX: Atomic structure to safely reload directly via 'nft -f'
+        cat <<EOF >"$OS_BYPASS_FILE"
+add table inet filter
+add chain inet filter input { type filter hook input priority filter; policy drop; }
+flush chain inet filter input
+EOF
 
-        echo "        tcp dport { ${SSH_PORT:-22}, 9999 } accept comment \"SysWarden: Auto-allow SSH & UI\"" >>"$OS_BYPASS_FILE"
+        if [[ "${USE_WIREGUARD:-n}" == "y" ]]; then
+            cat <<EOF >>"$OS_BYPASS_FILE"
+add chain inet filter forward { type filter hook forward priority filter; policy drop; }
+flush chain inet filter forward
+EOF
+        fi
+
+        cat <<EOF >>"$OS_BYPASS_FILE"
+table inet filter {
+    chain input {
+        ct state established,related accept
+        iifname "lo" accept
+        ip protocol icmp accept
+        meta l4proto ipv6-icmp accept
+        tcp dport { ${SSH_PORT:-22}, 9999 } accept comment "SysWarden: Auto-allow SSH & UI"
+EOF
 
         if [[ "${USE_WIREGUARD:-n}" == "y" ]]; then
             echo "        udp dport ${WG_PORT:-51820} accept comment \"SysWarden: WireGuard Port\"" >>"$OS_BYPASS_FILE"
             echo "        iifname \"wg0\" accept comment \"SysWarden: WireGuard Interface\"" >>"$OS_BYPASS_FILE"
         fi
 
-        # Dynamically add all discovered active ports to the native bypass
         if [[ -n "$ACTIVE_PORTS" ]] && [[ "$ACTIVE_PORTS" != "none" ]]; then
             echo "        tcp dport { $ACTIVE_PORTS } accept comment \"SysWarden: Auto-allow Discovered Services\"" >>"$OS_BYPASS_FILE"
         fi
@@ -991,17 +1001,44 @@ EOF
         echo "    }" >>"$OS_BYPASS_FILE"
 
         if [[ "${USE_WIREGUARD:-n}" == "y" ]]; then
-            echo "    chain forward {" >>"$OS_BYPASS_FILE"
-            echo "        type filter hook forward priority filter; policy drop;" >>"$OS_BYPASS_FILE"
-            echo "        ct state established,related accept" >>"$OS_BYPASS_FILE"
-            echo "        iifname \"wg0\" accept comment \"SysWarden: WireGuard Forwarding\"" >>"$OS_BYPASS_FILE"
-            echo "        oifname \"wg0\" accept comment \"SysWarden: WireGuard Forwarding\"" >>"$OS_BYPASS_FILE"
-            echo "    }" >>"$OS_BYPASS_FILE"
+            cat <<EOF >>"$OS_BYPASS_FILE"
+    chain forward {
+        ct state established,related accept
+        iifname "wg0" accept comment "SysWarden: WireGuard Forwarding"
+        oifname "wg0" accept comment "SysWarden: WireGuard Forwarding"
+    }
+EOF
         fi
         echo "}" >>"$OS_BYPASS_FILE"
 
-        # DEVSECOPS FIX: Clean reload via OpenRC instead of 'nft -f' to prevent rule duplication
-        rc-service nftables reload >/dev/null 2>&1 || rc-service nftables restart >/dev/null 2>&1 || true
+        # DEVSECOPS FIX: Force injection into RAM immediately
+        nft -f "$OS_BYPASS_FILE"
+
+        # --- MODULAR PERSISTENCE (ZERO-TOUCH) ---
+        log "INFO" "Saving SysWarden Nftables table to isolated config..."
+        mkdir -p /etc/syswarden
+        nft list table inet syswarden_table >/etc/syswarden/syswarden.nft
+
+        local MAIN_NFT_CONF="/etc/nftables.nft"
+
+        # DEVSECOPS FIX: Robust fallback if the OS file is completely missing
+        if [[ ! -f "$MAIN_NFT_CONF" ]]; then
+            log "WARN" "$MAIN_NFT_CONF not found. Creating basic layout."
+            echo '#!/usr/sbin/nft -f' >"$MAIN_NFT_CONF"
+            echo 'flush ruleset' >>"$MAIN_NFT_CONF"
+            chmod 755 "$MAIN_NFT_CONF"
+        fi
+
+        if ! grep -q 'include "/etc/syswarden/syswarden.nft"' "$MAIN_NFT_CONF"; then
+            echo -e '\n# Added by SysWarden' >>"$MAIN_NFT_CONF"
+            echo 'include "/etc/syswarden/syswarden.nft"' >>"$MAIN_NFT_CONF"
+        fi
+        if ! grep -q 'include "/etc/nftables.d/\*.nft"' "$MAIN_NFT_CONF"; then
+            echo 'include "/etc/nftables.d/*.nft"' >>"$MAIN_NFT_CONF"
+        fi
+
+        # Save state natively for OpenRC
+        rc-service nftables save >/dev/null 2>&1 || true
         # -------------------------------------------------------------
 
     else
@@ -3619,7 +3656,7 @@ setup_wazuh_agent() {
 }
 
 # ==============================================================================
-# SYSWARDEN v1.73 - TELEMETRY BACKEND (SERVERLESS - IP REGISTRY UPDATE)
+# SYSWARDEN v1.74 - TELEMETRY BACKEND (SERVERLESS - IP REGISTRY UPDATE)
 # ==============================================================================
 function setup_telemetry_backend() {
     log "INFO" "Installation of the advanced telemetry engine (Backend)..."
@@ -3636,6 +3673,14 @@ IFS=$'\n\t'
 # --- SECURITY FIX: ZOMBIE PROCESS PREVENTION ---
 # Ensures all background processes spawned by Fail2ban checks are cleanly reaped.
 trap 'wait' EXIT
+
+# --- DEVSECOPS FIX: ABSOLUTE MUTEX LOCK (ANTI-OVERLAP) ---
+# Prevents CPU leaks by ensuring only ONE instance can ever run mathematically
+exec 9>"/tmp/syswarden-telemetry.lock"
+if ! flock -n 9; then
+    exit 0
+fi
+# ---------------------------------------------------------
 
 # --- Configuration Paths ---
 SYSWARDEN_DIR="/etc/syswarden"
@@ -3674,29 +3719,34 @@ L7_TOTAL_BANNED=0; L7_ACTIVE_JAILS=0
 JAILS_JSON="[]"
 BANNED_IPS_JSON="[]"
 
-if command -v fail2ban-client >/dev/null && fail2ban-client ping >/dev/null 2>&1; then
-    JAIL_LIST=$(fail2ban-client status | awk -F'Jail list:[ \t]*' '/Jail list:/ {print $2}' | tr -d ' ' | tr ',' '\n')
+# DEVSECOPS FIX: Strict timeouts to prevent Fail2ban socket deadlocks freezing the cron
+if command -v fail2ban-client >/dev/null && timeout 2 fail2ban-client ping >/dev/null 2>&1; then
+    JAIL_LIST=$(timeout 2 fail2ban-client status 2>/dev/null | awk -F'Jail list:[ \t]*' '/Jail list:/ {print $2}' | tr -d ' ' | tr ',' '\n' || true)
     
     for JAIL in $JAIL_LIST; do
         [[ -z "$JAIL" ]] && continue
         L7_ACTIVE_JAILS=$((L7_ACTIVE_JAILS + 1))
         
-        STATUS_OUT=$(fail2ban-client status "$JAIL")
-        BANNED_COUNT=$(echo "$STATUS_OUT" | awk '/Currently banned:/ {print $4}' || echo "0")
-        BANNED_COUNT=${BANNED_COUNT:-0}
-        L7_TOTAL_BANNED=$((L7_TOTAL_BANNED + BANNED_COUNT))
+        # DEVSECOPS FIX: Abort jail query if it hangs for more than 3 seconds
+        STATUS_OUT=$(timeout 3 fail2ban-client status "$JAIL" 2>/dev/null || echo "")
         
-        if [[ "$BANNED_COUNT" -gt 0 ]]; then
-            # Safely append jail object using jq
-            JAILS_JSON=$(echo "$JAILS_JSON" | jq --arg n "$JAIL" --argjson c "$BANNED_COUNT" '. + [{"name": $n, "count": $c}]')
+        if [[ -n "$STATUS_OUT" ]]; then
+            BANNED_COUNT=$(echo "$STATUS_OUT" | awk '/Currently banned:/ {print $4}' || echo "0")
+            BANNED_COUNT=${BANNED_COUNT:-0}
+            L7_TOTAL_BANNED=$((L7_TOTAL_BANNED + BANNED_COUNT))
             
-            # Extract and safely append IPs
-            BANNED_IPS=$(echo "$STATUS_OUT" | awk -F'Banned IP list:[ \t]*' '/Banned IP list:/ {print $2}' | tr -d ',' | tr ' ' '\n' | tail -n 50 || true)
-            for IP in $BANNED_IPS; do
-                if [[ -n "$IP" ]]; then
-                    BANNED_IPS_JSON=$(echo "$BANNED_IPS_JSON" | jq --arg ip "$IP" --arg j "$JAIL" '. + [{"ip": $ip, "jail": $j}]')
-                fi
-            done
+            if [[ "$BANNED_COUNT" -gt 0 ]]; then
+                # Safely append jail object using jq
+                JAILS_JSON=$(echo "$JAILS_JSON" | jq --arg n "$JAIL" --argjson c "$BANNED_COUNT" '. + [{"name": $n, "count": $c}]')
+                
+                # Extract and safely append IPs
+                BANNED_IPS=$(echo "$STATUS_OUT" | awk -F'Banned IP list:[ \t]*' '/Banned IP list:/ {print $2}' | tr -d ',' | tr ' ' '\n' | tail -n 50 || true)
+                for IP in $BANNED_IPS; do
+                    if [[ -n "$IP" ]]; then
+                        BANNED_IPS_JSON=$(echo "$BANNED_IPS_JSON" | jq --arg ip "$IP" --arg j "$JAIL" '. + [{"ip": $ip, "jail": $j}]')
+                    fi
+                done
+            fi
         fi
     done
 fi
@@ -3783,7 +3833,7 @@ EOF
 }
 
 # ==============================================================================
-# SYSWARDEN v1.73 - NGINX SECURE DASHBOARD (HTTPS / CSP / LOCAL FONTS / BENTO-DARK)
+# SYSWARDEN v1.74 - NGINX SECURE DASHBOARD (HTTPS / CSP / LOCAL FONTS / BENTO-DARK)
 # ==============================================================================
 function generate_dashboard() {
     log "INFO" "Generating the Nginx-secured Dashboard UI (HTTPS/CSP/Local-Fonts)..."
@@ -4016,7 +4066,7 @@ function generate_dashboard() {
         <div class="container flex-between">
             <div class="flex-align">
                 <h1 style="font-size: 1.3rem; font-weight: bold; letter-spacing: -0.05em; display: flex; align-items: flex-start;">
-                    SYSWARDEN&nbsp;<span class="text-brand">v1.73</span>
+                    SYSWARDEN&nbsp;<span class="text-brand">v1.74</span>
                     <div class="syswarden-pulse"></div>
                 </h1>
             </div>
@@ -4991,7 +5041,7 @@ if [[ "$MODE" != "update" ]]; then
         CYAN='\033[0;36m'
         clear
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
-        echo -e "${GREEN}${BOLD}                   SYSWARDEN v1.73 - PRE-FLIGHT CHECKLIST                     ${NC}"
+        echo -e "${GREEN}${BOLD}                   SYSWARDEN v1.74 - PRE-FLIGHT CHECKLIST                     ${NC}"
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
         echo -e "Before proceeding with the deployment, please ensure you have the following"
         echo -e "information ready. If you lack any required data, press [Ctrl+C] to abort,"

@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# SysWarden v1.73 - DevSecOps Audit & Compliance Tool
+# SysWarden v1.74 - DevSecOps Audit & Compliance Tool
 # Copyright (C) 2026 duggytuxy - Laurent M.
 #
 # This program is free software: you can redistribute it and/or modify
@@ -268,7 +268,7 @@ else
     fail "SysWarden firewall rules not found in kernel space."
 fi
 
-# --- Verify Catch-All Drop Policy (v1.73 Zero Trust Architecture) ---
+# --- Verify Catch-All Drop Policy (v1.74 Zero Trust Architecture) ---
 CATCH_ALL_PASSED=0
 if [[ "$FW_ENGINE" == "Nftables" ]]; then
     # 1. Debian Architecture (Explicit Catch-All rule in backend chain)
@@ -396,8 +396,22 @@ TELEMETRY_GHOST_DETECTED=0
 
 for i in {60..1}; do
     printf "\r  [~] Monitoring process stack... %02ds remaining " "$i"
-    TELEMETRY_RAW=$(ps aux | grep "[s]yswarden-telemetry.sh" | wc -l || echo 0)
-    TELEMETRY_PROC_COUNT=$(echo "$TELEMETRY_RAW" | awk '{print $1}' | head -n1)
+
+    # DEVSECOPS FIX: Filter out subshells by building a PID/PPID tree.
+    # Only processes whose parent is NOT another telemetry script are counted as independent instances.
+    TELEMETRY_RAW=$(ps -ef | grep "[s]yswarden-telemetry.sh" | grep -vE "sh -c|CROND|grep" || true)
+
+    # AWK maps PIDs ($2) to PPIDs ($3) and counts only roots of the process tree
+    TELEMETRY_PROC_COUNT=$(echo "$TELEMETRY_RAW" | awk '{
+        if ($2 != "") pids[$2]=$3 
+    } 
+    END {
+        count=0; 
+        for (p in pids) { 
+            if (!(pids[p] in pids)) count++ 
+        }; 
+        print count+0
+    }')
 
     if [ "${TELEMETRY_PROC_COUNT:-0}" -gt 1 ]; then
         TELEMETRY_GHOST_DETECTED=1
@@ -570,6 +584,17 @@ else
 fi
 
 info "Scanning for globally exposed listening ports (0.0.0.0 / ::)..."
+
+# DEVSECOPS FIX: Dynamically extract user-discovered deliberate ports from Alpine Bypass Table
+DISCOVERED_PORTS=""
+if [[ -f "/etc/nftables.d/syswarden-os-bypass.nft" ]]; then
+    # Extracts ports specifically tagged as user-authorized from the array { 21, 23, 80 ... }
+    RAW_PORTS=$(grep "Auto-allow Discovered Services" /etc/nftables.d/syswarden-os-bypass.nft | grep -oE '\{[^\}]+\}' | tr -d '{} ' || true)
+    # FIX: Use newline instead of space to respect the strict DevSecOps IFS=$'\n\t'
+    DISCOVERED_PORTS=$(echo "$RAW_PORTS" | tr ',' '\n')
+fi
+
+# Extract live sockets directly from the kernel
 if command -v ss >/dev/null 2>&1; then
     LISTEN_PORTS=$(ss -tlnp 2>/dev/null | grep -E '0\.0\.0\.0|::' | awk '{print $4}' | awk -F':' '{print $NF}' | sort -nu || true)
 else
@@ -578,10 +603,30 @@ fi
 
 if [[ -n "$LISTEN_PORTS" ]]; then
     for PORT in $LISTEN_PORTS; do
+
+        # Check if the port is in the dynamically discovered user list
+        DELIBERATE=0
+        if [[ -n "$DISCOVERED_PORTS" ]]; then
+            for dp in $DISCOVERED_PORTS; do
+                if [[ -n "$dp" ]] && [[ "$PORT" -eq "$dp" ]]; then
+                    DELIBERATE=1
+                    break
+                fi
+            done
+        fi
+
         if [[ "$PORT" -eq "$SSH_PORT" ]]; then
-            info "Exposed Port: $PORT/TCP (SSH) - Guarded by Zero Trust VPN Guillotine (Drop policy)."
+            if [[ ${CLOAK_PASSED:-0} -eq 1 ]]; then
+                info "Exposed Port: $PORT/TCP (SSH) - Guarded by Zero Trust VPN Guillotine (Drop policy)."
+            else
+                info "Exposed Port: $PORT/TCP (SSH) - Publicly exposed (Guarded by Fail2ban sshd jail)."
+            fi
         elif [[ "$PORT" -eq 80 || "$PORT" -eq 443 ]]; then
             info "Exposed Port: $PORT/TCP (Web) - Guarded by SysWarden Layer 7 LFI/SQLi/Bot Jails."
+        elif [[ "$PORT" -eq 21 ]]; then
+            info "Exposed Port: $PORT/TCP (FTP Honeypot) - Guarded by Fail2ban vsftpd jail."
+        elif [[ "$PORT" -eq 23 ]]; then
+            info "Exposed Port: $PORT/TCP (Telnet Honeypot) - Guarded by Fail2ban Mirai/IoT jail."
         elif [[ "$PORT" -eq 111 ]]; then
             info "Exposed Port: $PORT/TCP (rpcbind) - Internal RPC service, guarded by default OS Firewall."
         elif [[ "$PORT" -eq 9999 ]]; then
@@ -590,6 +635,8 @@ if [[ -n "$LISTEN_PORTS" ]]; then
             info "Exposed Port: $PORT/UDP (WireGuard) - Guarded by SysWarden Stealth UDP protections."
         elif [[ "$PORT" -eq 53 || "$PORT" -eq 123 || "$PORT" -eq 161 ]]; then
             info "Exposed Port: $PORT (Infra) - Standard Infrastructure Protocol (DNS/NTP)."
+        elif [[ $DELIBERATE -eq 1 ]]; then
+            info "Exposed Port: $PORT/TCP (User Service) - Deliberately opened and integrated into OS bypass table."
         else
             warn "Exposed Port: $PORT/TCP - Open to the public. Verify if this service requires zero-trust isolation."
         fi
