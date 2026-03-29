@@ -33,7 +33,7 @@ LOG_FILE="/var/log/syswarden-install.log"
 CONF_FILE="/etc/syswarden.conf"
 SET_NAME="syswarden_blacklist"
 TMP_DIR=$(mktemp -d)
-VERSION="v1.74"
+VERSION="v1.75"
 ACTIVE_PORTS=""
 SYSWARDEN_DIR="/etc/syswarden"
 WHITELIST_FILE="$SYSWARDEN_DIR/whitelist.txt"
@@ -1240,7 +1240,7 @@ EOF
             # 3. Allow WireGuard UDP port for tunnel establishment
             firewall-cmd --permanent --add-port="${WG_PORT:-51820}/udp" >/dev/null 2>&1 || true
 
-            # --- STRICT ZERO TRUST HIERARCHY (v1.74) - DEBIAN PARITY) ---
+            # --- STRICT ZERO TRUST HIERARCHY (v1.75) - DEBIAN PARITY) ---
 
             # Priority -1000: Highest priority. Allow SSH & Dashboard strictly from VPN.
             firewall-cmd --permanent --add-rich-rule="rule priority='-1000' family='ipv4' source address='${WG_SUBNET}' port port='${SSH_PORT:-22}' protocol='tcp' accept" >/dev/null 2>&1 || true
@@ -1736,10 +1736,10 @@ configure_fail2ban() {
         fi
         # -------------------------------------------------------
 
-        # 1. Syslog requirement
+        # 1. Standardized Log Target (Crucial for Recidive Jail and Telemetry JSON)
         cat <<EOF >/etc/fail2ban/fail2ban.local
 [Definition]
-logtarget = SYSLOG
+logtarget = /var/log/fail2ban.log
 EOF
 
         # 2. Backup
@@ -4160,6 +4160,7 @@ uninstall_syswarden() {
     done
     rm -f /etc/fail2ban/action.d/syswarden-docker.conf
     rm -f /etc/fail2ban/jail.local
+    rm -f /etc/fail2ban/fail2ban.local
 
     if [[ "${FAIL2BAN_INSTALLED_BY_SYSWARDEN:-n}" == "y" ]]; then
         log "INFO" "Purging Fail2ban (installed by SysWarden)..."
@@ -4433,7 +4434,7 @@ EOF
 }
 
 # ==============================================================================
-# SYSWARDEN v1.74 - TELEMETRY BACKEND (SERVERLESS - IP REGISTRY UPDATE)
+# SYSWARDEN v1.75 - TELEMETRY BACKEND (SERVERLESS - IP REGISTRY UPDATE)
 # ==============================================================================
 function setup_telemetry_backend() {
     log "INFO" "Installation of the advanced telemetry engine (Backend)..."
@@ -4448,8 +4449,14 @@ set -euo pipefail
 IFS=$'\n\t'
 
 # --- SECURITY FIX: ZOMBIE PROCESS PREVENTION ---
-# Ensures all background processes spawned by Fail2ban checks are cleanly reaped.
 trap 'wait' EXIT
+
+# --- DEVSECOPS FIX: ABSOLUTE MUTEX LOCK (ANTI-OVERLAP) ---
+exec 9>"/tmp/syswarden-telemetry.lock"
+if ! flock -n 9; then
+    exit 0
+fi
+# ---------------------------------------------------------
 
 # --- Configuration Paths ---
 SYSWARDEN_DIR="/etc/syswarden"
@@ -4460,7 +4467,6 @@ DATA_FILE="$UI_DIR/data.json"
 mkdir -p "$UI_DIR"
 
 # --- DEVSECOPS FIX: UNIVERSAL PACKAGE MANAGER ---
-# Ensure jq is installed for atomic and safe JSON serialization
 if ! command -v jq >/dev/null; then
     if [[ -f /etc/debian_version ]]; then apt-get install -y jq >/dev/null 2>&1 || true
     elif [[ -f /etc/redhat-release ]]; then dnf install -y jq >/dev/null 2>&1 || true; fi
@@ -4469,7 +4475,6 @@ fi
 # --- System Metrics Gathering ---
 SYS_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 SYS_HOSTNAME=$(hostname)
-# --- FIX: KERNEL EXTRACTION & FAULT-TOLERANT VARIABLES ---
 SYS_UPTIME=$(awk '{d=int($1/86400); h=int(($1%86400)/3600); m=int(($1%3600)/60); if(d>0) printf "%dd %dh %dm", d, h, m; else printf "%dh %dm", h, m}' /proc/uptime 2>/dev/null || echo "Unknown")
 SYS_LOAD=$(cat /proc/loadavg 2>/dev/null | awk '{print $1", "$2", "$3}' || echo "0, 0, 0")
 
@@ -4477,7 +4482,6 @@ SYS_RAM_USED=$(free -m 2>/dev/null | awk '/^Mem:/{print $3}')
 SYS_RAM_USED=${SYS_RAM_USED:-0}
 SYS_RAM_TOTAL=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}')
 SYS_RAM_TOTAL=${SYS_RAM_TOTAL:-0}
-# ---------------------------------------------------------
 
 # --- Layer 3 Metrics ---
 L3_GLOBAL=0; L3_GEOIP=0; L3_ASN=0
@@ -4490,27 +4494,31 @@ L7_TOTAL_BANNED=0; L7_ACTIVE_JAILS=0
 JAILS_JSON="[]"
 BANNED_IPS_JSON="[]"
 
-if command -v fail2ban-client >/dev/null && fail2ban-client ping >/dev/null 2>&1; then
-    JAIL_LIST=$(fail2ban-client status | awk -F'Jail list:[ \t]*' '/Jail list:/ {print $2}' | tr -d ' ' | tr ',' '\n')
+# DEVSECOPS FIX: Strict timeouts to prevent Fail2ban socket deadlocks
+if command -v fail2ban-client >/dev/null && timeout 2 fail2ban-client ping >/dev/null 2>&1; then
+    JAIL_LIST=$(timeout 2 fail2ban-client status 2>/dev/null | awk -F'Jail list:[ \t]*' '/Jail list:/ {print $2}' | tr -d ' ' | tr ',' '\n' || true)
     
     for JAIL in $JAIL_LIST; do
         [[ -z "$JAIL" ]] && continue
         L7_ACTIVE_JAILS=$((L7_ACTIVE_JAILS + 1))
         
-        STATUS_OUT=$(fail2ban-client status "$JAIL")
-        BANNED_COUNT=$(echo "$STATUS_OUT" | awk '/Currently banned:/ {print $4}' || echo "0")
-        BANNED_COUNT=${BANNED_COUNT:-0}
-        L7_TOTAL_BANNED=$((L7_TOTAL_BANNED + BANNED_COUNT))
+        STATUS_OUT=$(timeout 3 fail2ban-client status "$JAIL" 2>/dev/null || echo "")
         
-        if [[ "$BANNED_COUNT" -gt 0 ]]; then
-            JAILS_JSON=$(echo "$JAILS_JSON" | jq --arg n "$JAIL" --argjson c "$BANNED_COUNT" '. + [{"name": $n, "count": $c}]')
+        if [[ -n "$STATUS_OUT" ]]; then
+            BANNED_COUNT=$(echo "$STATUS_OUT" | awk '/Currently banned:/ {print $4}' || echo "0")
+            BANNED_COUNT=${BANNED_COUNT:-0}
+            L7_TOTAL_BANNED=$((L7_TOTAL_BANNED + BANNED_COUNT))
             
-            BANNED_IPS=$(echo "$STATUS_OUT" | awk -F'Banned IP list:[ \t]*' '/Banned IP list:/ {print $2}' | tr -d ',' | tr ' ' '\n' | tail -n 50 || true)
-            for IP in $BANNED_IPS; do
-                if [[ -n "$IP" ]]; then
-                    BANNED_IPS_JSON=$(echo "$BANNED_IPS_JSON" | jq --arg ip "$IP" --arg j "$JAIL" '. + [{"ip": $ip, "jail": $j}]')
-                fi
-            done
+            if [[ "$BANNED_COUNT" -gt 0 ]]; then
+                JAILS_JSON=$(echo "$JAILS_JSON" | jq --arg n "$JAIL" --argjson c "$BANNED_COUNT" '. + [{"name": $n, "count": $c}]')
+                
+                BANNED_IPS=$(echo "$STATUS_OUT" | awk -F'Banned IP list:[ \t]*' '/Banned IP list:/ {print $2}' | tr -d ',' | tr ' ' '\n' | tail -n 50 || true)
+                for IP in $BANNED_IPS; do
+                    if [[ -n "$IP" ]]; then
+                        BANNED_IPS_JSON=$(echo "$BANNED_IPS_JSON" | jq --arg ip "$IP" --arg j "$JAIL" '. + [{"ip": $ip, "jail": $j}]')
+                    fi
+                done
+            fi
         fi
     done
 fi
@@ -4519,10 +4527,9 @@ fi
 TOP_ATTACKERS_JSON="[]"
 TOP_STATS=""
 
-# We aggregate all possible log sources and catch both fresh "Ban" and F2B restart "Restore Ban"
+# FIX: We rely exclusively on Fail2ban's core log to avoid 100% CPU spikes from journalctl 7-day queries.
 TOP_STATS=$( { 
-    if command -v journalctl >/dev/null; then journalctl -S "7 days ago" --no-pager 2>/dev/null; fi
-    cat /var/log/fail2ban.log /var/log/syslog /var/log/daemon.log /var/log/messages 2>/dev/null || true
+    cat /var/log/fail2ban.log 2>/dev/null || true
 } | grep -E "\] (Restore )?Ban " | grep -Eo "([0-9]{1,3}\.){3}[0-9]{1,3}" | sort | uniq -c | sort -nr | head -n 10 || true )
 
 if [[ -n "$TOP_STATS" ]]; then
@@ -4532,7 +4539,6 @@ if [[ -n "$TOP_STATS" ]]; then
         fi
     done <<< "$TOP_STATS"
 fi
-# ----------------------------------------------------------------------------------------------------------------------------------------
 
 # --- Whitelist Registry Extraction ---
 WHITELIST_COUNT=0
@@ -4598,7 +4604,7 @@ EOF
 }
 
 # ==============================================================================
-# SYSWARDEN v1.74 - NGINX SECURE DASHBOARD (HTTPS / CSP / LOCAL FONTS / BENTO-DARK)
+# SYSWARDEN v1.75 - NGINX SECURE DASHBOARD (HTTPS / CSP / LOCAL FONTS / BENTO-DARK)
 # ==============================================================================
 function generate_dashboard() {
     log "INFO" "Generating the Nginx-secured Dashboard UI (HTTPS/CSP/Local-Fonts)..."
@@ -4831,7 +4837,7 @@ function generate_dashboard() {
         <div class="container flex-between">
             <div class="flex-align">
                 <h1 style="font-size: 1.3rem; font-weight: bold; letter-spacing: -0.05em; display: flex; align-items: flex-start;">
-                    SYSWARDEN&nbsp;<span class="text-brand">v1.74</span>
+                    SYSWARDEN&nbsp;<span class="text-brand">v1.75</span>
                     <div class="syswarden-pulse"></div>
                 </h1>
             </div>
@@ -5888,7 +5894,7 @@ fi
 if [[ "$MODE" != "update" ]]; then
     clear
     echo -e "${GREEN}#############################################################"
-    echo -e "#     SysWarden Tool Installer (Universal v1.74)     #"
+    echo -e "#     SysWarden Tool Installer (Universal v1.75)     #"
     echo -e "#############################################################${NC}"
 fi
 
@@ -5925,7 +5931,7 @@ if [[ "$MODE" != "update" ]]; then
         CYAN='\033[0;36m'
         clear
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
-        echo -e "${GREEN}${BOLD}                   SYSWARDEN v1.74 - PRE-FLIGHT CHECKLIST                     ${NC}"
+        echo -e "${GREEN}${BOLD}                   SYSWARDEN v1.75 - PRE-FLIGHT CHECKLIST                     ${NC}"
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
         echo -e "Before proceeding with the deployment, please ensure you have the following"
         echo -e "information ready. If you lack any required data, press [Ctrl+C] to abort,"
