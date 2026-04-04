@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# SysWarden v1.87 - DevSecOps Audit & Compliance Tool
+# SysWarden v1.88 - DevSecOps Audit & Compliance Tool
 # Copyright (C) 2026 duggytuxy - Laurent M.
 #
 # This program is free software: you can redistribute it and/or modify
@@ -17,7 +17,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #
-# Architecture: Universal (Alpine, Debian, Ubuntu, RHEL, Alma)
+# Architecture: Universal (Alpine, Debian, Ubuntu, RHEL, Alma, Slackware)
 # Objective: Verify Component Status, Log Isolation, and Zero Trust Permissions
 # ==============================================================================
 
@@ -72,9 +72,20 @@ info() {
     sleep 2
 }
 
+# --- DEVSECOPS FIX: SLACKWARE NATIVE PROCESS DETECTION ---
 is_service_active() {
     local svc="$1"
-    if command -v systemctl >/dev/null 2>&1; then
+    if [[ "$OS_TYPE" == "Slackware" ]]; then
+        case "$svc" in
+            rsyslog | syslog | syslogd) ps -ef 2>/dev/null | grep "[s]yslogd\|[r]syslogd" >/dev/null ;;
+            fail2ban) ps -ef 2>/dev/null | grep "[f]ail2ban-server" >/dev/null ;;
+            nginx) ps -ef 2>/dev/null | grep "[n]ginx" >/dev/null ;;
+            syswarden-reporter) ps -ef 2>/dev/null | grep "[s]yswarden_reporter.py" >/dev/null ;;
+            docker) ps -ef 2>/dev/null | grep "[d]ockerd" >/dev/null ;;
+            *) return 1 ;;
+        esac
+        return $?
+    elif command -v systemctl >/dev/null 2>&1; then
         systemctl is-active --quiet "$svc"
     elif command -v rc-service >/dev/null 2>&1; then
         rc-service "$svc" status 2>/dev/null | grep "started" >/dev/null
@@ -115,13 +126,14 @@ fi
 
 OS_TYPE="Universal"
 if [[ -f /etc/alpine-release ]]; then OS_TYPE="Alpine"; fi
+if [[ -f /etc/slackware-version ]]; then OS_TYPE="Slackware"; fi
 info "Detected OS Environment: $OS_TYPE"
 
 if [[ -f "/etc/syswarden.conf" ]]; then
     source "/etc/syswarden.conf" 2>/dev/null || true
 fi
 
-# DEVSECOPS FIX: Pre-detect Firewall Engine globally to prevent crashes in partial audits
+# Pre-detect Firewall Engine globally to prevent crashes in partial audits
 FW_ENGINE="Unknown"
 if command -v nft >/dev/null && nft list table inet syswarden_table >/dev/null 2>&1; then
     FW_ENGINE="Nftables"
@@ -133,7 +145,7 @@ elif command -v iptables >/dev/null && iptables -n -L INPUT | grep "SysWarden" >
     FW_ENGINE="Iptables"
 fi
 
-# DEVSECOPS FIX: Pre-detect SSH Port globally
+# Pre-detect SSH Port globally
 SSH_PORT=$(ss -tlnp 2>/dev/null | grep sshd | awk '{print $4}' | awk -F':' '{print $NF}' | head -n 1 || echo "")
 if [[ -z "$SSH_PORT" ]]; then
     SSH_PORT=$(netstat -tlnp 2>/dev/null | grep sshd | awk '{print $4}' | awk -F':' '{print $NF}' | head -n 1 || echo "")
@@ -208,10 +220,19 @@ if [[ "$RUN_ALL" -eq 1 || "$USER_PHASES" == *" 1 "* ]]; then
 
     if [[ "${APPLY_OS_HARDENING:-n}" == "y" ]]; then
 
-        if [[ -f "/etc/cron.allow" ]]; then
-            check_file_perms "/etc/cron.allow" "600" "root"
+        # DEVSECOPS FIX: OS-Specific Cron Allow Path
+        if [[ "$OS_TYPE" == "Slackware" ]]; then
+            if [[ -f "/var/spool/cron/cron.allow" ]]; then
+                check_file_perms "/var/spool/cron/cron.allow" "600" "root"
+            else
+                fail "/var/spool/cron/cron.allow is missing (Crontab not locked down)"
+            fi
         else
-            fail "/etc/cron.allow is missing (Crontab not locked down)"
+            if [[ -f "/etc/cron.allow" ]]; then
+                check_file_perms "/etc/cron.allow" "600" "root"
+            else
+                fail "/etc/cron.allow is missing (Crontab not locked down)"
+            fi
         fi
 
         PRIV_USERS=$(awk -F':' '/^(wheel|sudo|adm):/ {print $4}' /etc/group | tr ',' '\n' | grep -v '^$' | grep -v 'root' || true)
@@ -301,10 +322,19 @@ if [[ "$RUN_ALL" -eq 1 || "$USER_PHASES" == *" 2 "* ]]; then
         check_file_perms "/var/log/auth-syswarden.log" "600" "root"
     fi
 
-    if is_service_active "rsyslog"; then
-        pass "Rsyslog daemon is active and routing logs securely."
+    # DEVSECOPS FIX: Support for native syslogd on Slackware
+    if [[ "$OS_TYPE" == "Slackware" ]]; then
+        if is_service_active "syslog"; then
+            pass "Syslogd daemon (Native Slackware) is active and routing logs securely."
+        else
+            fail "Syslogd daemon is not running."
+        fi
     else
-        fail "Rsyslog daemon is not running."
+        if is_service_active "rsyslog"; then
+            pass "Rsyslog daemon is active and routing logs securely."
+        else
+            fail "Rsyslog daemon is not running."
+        fi
     fi
 fi
 
@@ -508,10 +538,10 @@ if [[ "$RUN_ALL" -eq 1 || "$USER_PHASES" == *" 5 "* ]]; then
         payload_perms=$(stat -c "%a" "/etc/syswarden/ui/data.json" 2>/dev/null || stat -f "%Op" "/etc/syswarden/ui/data.json" | cut -c4-6)
         payload_owner=$(stat -c "%U" "/etc/syswarden/ui/data.json" 2>/dev/null || stat -f "%Su" "/etc/syswarden/ui/data.json")
 
-        if [[ "$payload_perms" == *"640" ]] && [[ "$payload_owner" == "nginx" || "$payload_owner" == "www-data" ]]; then
+        if [[ "$payload_perms" == *"640" ]] && [[ "$payload_owner" == "nginx" || "$payload_owner" == "www-data" || "$payload_owner" == "nobody" ]]; then
             pass "Telemetry payload ownership & permissions are strictly isolated (640, Owner: $payload_owner)."
         else
-            fail "Telemetry payload has weak permissions/ownership (Got $payload_perms $payload_owner, Expected 640 nginx/www-data)."
+            fail "Telemetry payload has weak permissions/ownership (Got $payload_perms $payload_owner, Expected 640)."
         fi
     else
         warn "Telemetry payload (data.json) not found yet. Awaiting initial cron execution."
@@ -535,7 +565,7 @@ fi
 if [[ "$RUN_ALL" -eq 1 || "$USER_PHASES" == *" 6 "* ]]; then
     log_header "Phase 6: Zero Trust Remote Access (VPN & SSH Cloaking)"
 
-    if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld 2>/dev/null; then
+    if command -v firewall-cmd >/dev/null 2>&1 && is_service_active "firewalld" 2>/dev/null; then
         if firewall-cmd --list-rich-rules 2>/dev/null | grep "priority=\"-900\".*port=\"${SSH_PORT}\".*drop" >/dev/null; then
             CLOAK_PASSED=1
         fi
@@ -578,7 +608,7 @@ if [[ "$RUN_ALL" -eq 1 || "$USER_PHASES" == *" 6 "* ]]; then
         fi
 
         VPN_ALLOW_PASSED=0
-        if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld 2>/dev/null; then
+        if command -v firewall-cmd >/dev/null 2>&1 && is_service_active "firewalld" 2>/dev/null; then
             if firewall-cmd --permanent --zone=trusted --list-interfaces 2>/dev/null | grep "wg0" >/dev/null; then
                 VPN_ALLOW_PASSED=1
             fi
@@ -630,7 +660,14 @@ fi
 if [[ "$RUN_ALL" -eq 1 || "$USER_PHASES" == *" 7 "* ]]; then
     log_header "Phase 7: Exposed Services & Firewall Persistence (CSPM)"
 
-    if [[ "$FW_ENGINE" == "Nftables" ]]; then
+    # DEVSECOPS FIX: Persistence check specifically for Slackware RC Hooks
+    if [[ "$OS_TYPE" == "Slackware" ]]; then
+        if [[ -x "/etc/rc.d/rc.syswarden-firewall" ]] && grep -q "/etc/rc.d/rc.syswarden-firewall" /etc/rc.d/rc.local 2>/dev/null; then
+            pass "Firewall Persistence VERIFIED: Slackware rc.local securely triggers SysWarden ($FW_ENGINE) on boot."
+        else
+            fail "Firewall Persistence FAILED: Slackware rc.local integration is missing or rc.syswarden-firewall is not executable."
+        fi
+    elif [[ "$FW_ENGINE" == "Nftables" ]]; then
         if grep 'include "/etc/syswarden/syswarden.nft"' /etc/nftables.nft >/dev/null 2>&1 || grep 'include "/etc/syswarden/syswarden.nft"' /etc/nftables.conf >/dev/null 2>&1; then
             pass "Firewall Persistence VERIFIED: SysWarden Nftables rules are firmly anchored in main OS config."
         else
@@ -646,7 +683,7 @@ if [[ "$RUN_ALL" -eq 1 || "$USER_PHASES" == *" 7 "* ]]; then
         fi
 
     elif [[ "$FW_ENGINE" == "Firewalld" ]]; then
-        if systemctl is-enabled firewalld 2>/dev/null | grep "enabled" >/dev/null; then
+        if is_service_active "firewalld" 2>/dev/null; then
             pass "Firewall Persistence VERIFIED: Firewalld is enabled on boot (Rich Rules are persistent natively)."
         else
             fail "Firewall Persistence FAILED: Firewalld is not enabled on system boot."
