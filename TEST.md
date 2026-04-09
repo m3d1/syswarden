@@ -6,34 +6,34 @@
   <img src="https://img.shields.io/badge/License-GNU_GPLv3-yellow?style=for-the-badge&logo=license">
 </p>
 
-# 🛡️ SysWarden
+# SysWarden
 
-**An ultra-lightweight DevSecOps firewall orchestrator for Linux.** SysWarden proactively drops 97% of malicious internet traffic by fusing Data-Shield IPv4 blocklists, GeoIP, Spamhaus ASN, Cybercrime Hosters, dynamic Fail2ban jails with a near-zero memory footprint.
+**An ultra-lightweight DevSecOps firewall orchestrator for Linux.** SysWarden proactively drops 97% of malicious internet traffic by fusing [Data-Shield IPv4 blocklists](https://duggytuxy.github.io/), [IPdeny](https://www.ipdeny.com/ipblocks/), [Spamhaus ASN](https://www.spamhaus.org/drop/asndrop.json), [CINS Army](https://cinsscore.com/list/ci-badguys.txt), [Blocklist.de](https://www.blocklist.de/en/index.html), and dynamic [Fail2ban](https://github.com/fail2ban/fail2ban) jails with a near-zero memory footprint.
 
-## ⚡ Core Capabilities
+## Core Capabilities
 
 * **Drop 97% of background noise** and scanner traffic instantly at the kernel level.
 * **Cloak your SSH port** and administration panels behind an invisible WireGuard VPN.
-* **Block hostile countries** and rogue Autonomous System Numbers (ASN) automatically.
+* **Block hostile countries**, Cybercrime Hosters and rogue Autonomous System Numbers (ASN) automatically.
 * **Protect 46+ services dynamically** (Docker, Nginx, Databases, CMS) via heavily optimized Fail2ban jails.
-* **Monitor live threats** through a secure, self-hosted, and responsive Web Dashboard.
+* **Monitor live threats** through a secure, self-hosted, and responsive Web Dashboard and CLI Dashboard.
 * **Report attackers automatically** to the global AbuseIPDB network.
 
-## 🐧 Supported Environments
+## Supported Environments
 
 SysWarden is built to run flawlessly across modern Linux infrastructures:
-* **Universal (systemd):** Debian 12+, Ubuntu 22.04+, AlmaLinux, Rocky Linux, CentOS Stream, Fedora.
+* **Universal (systemd):** Debian 13+, Ubuntu 24.04+, AlmaLinux, Rocky Linux, CentOS Stream, Fedora.
 * **Alpine Linux (OpenRC):** Highly optimized for lightweight containers and edge nodes.
 * **Slackware (BSD-init):** Full native support with pure UNIX flat-file tailing.
 
-## 🛠️ Management & Auditing Tools
+## Management & Auditing Tools
 
 SysWarden comes with dedicated built-in utilities to maintain and verify your infrastructure's security lifecycle:
 
 * **`syswarden-manager.sh`**: The core administration utility. Use it to manually trigger threat-intel updates, manage your IP whitelists/blocklists, and check the firewall's operational status.
 * **`syswarden-audit.sh`**: A comprehensive DevSecOps auditing tool designed to evaluate your server's security posture, analyze logs, and verify SysWarden's architectural integrity.
 
-## 📊 The Fortress Dashboard
+## The Fortress Dashboard
 
 SysWarden includes a built-in, secure HTTPS UI to monitor your server's telemetry in real-time. It operates seamlessly without heavy database requirements.
 
@@ -43,7 +43,7 @@ SysWarden includes a built-in, secure HTTPS UI to monitor your server's telemetr
 
 *(Accessible via `https://<YOUR_SERVER_IP>:9999` after installation).*
 
-## 🚀 Quick Start
+## Quick Start
 
 Deploying enterprise-grade security takes less than 10 minutes.
 
@@ -74,7 +74,7 @@ chmod +x *.sh
 ./install-syswarden-slackware.sh
 ```
 
-## ⚙️ Automated Deployments (CI/CD & Fleet Management)
+## Automated Deployments (CI/CD & Fleet Management)
 
 For large-scale infrastructures and Infrastructure as Code (IaC) environments, SysWarden supports true zero-touch, unattended installations via the **`syswarden-auto.conf`** file.
 
@@ -86,7 +86,7 @@ For large-scale infrastructures and Infrastructure as Code (IaC) environments, S
 ./install-syswarden*.sh syswarden-auto.conf
 ```
 
-## 🛡️ Target: €3,000/year to fuel continuous DevSecOps innovation
+## Target: €3,000/year to fuel continuous DevSecOps improvements and integrations
 
 Developing **SysWarden** and curating the zero-false-positive **Data-Shield IPv4 Blocklists** requires dedicated server infrastructure and non-stop threat monitoring. 
 
@@ -96,5 +96,10 @@ Let's build a safer internet together!
 
 [![Support on Ko-Fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/laurentmduggytuxy)
 
----
+## License
+
+SysWarden is free and open-source software licensed under the **GNU General Public License v3.0 (GPLv3)**.
+
+You are free to use, modify, and distribute this software in compliance with the license terms. See the `LICENSE` file for more details.
+
 *Powered by DuggyTuxy (Laurent M.) - Securing the Open Source community.*
