@@ -8,7 +8,7 @@
 
 # SysWarden
 
-**An ultra-lightweight DevSecOps firewall orchestrator for Linux.** SysWarden proactively drops 97% of malicious internet traffic by fusing [Data-Shield IPv4 blocklists](https://duggytuxy.github.io/), [IPdeny](https://www.ipdeny.com/ipblocks/), [Spamhaus ASN](https://www.spamhaus.org/drop/asndrop.json), [CINS Army](https://cinsscore.com/list/ci-badguys.txt), [Blocklist.de](https://www.blocklist.de/en/index.html), and dynamic [Fail2ban](https://github.com/fail2ban/fail2ban) jails with a near-zero memory footprint.
+**An ultra-lightweight DevSecOps firewall orchestrator for Linux.** SysWarden (ver: v1.96) proactively drops 97% of malicious internet traffic by fusing [Data-Shield IPv4 blocklists](https://duggytuxy.github.io/), [IPdeny](https://www.ipdeny.com/ipblocks/), [Spamhaus ASN](https://www.spamhaus.org/drop/asndrop.json), [CINS Army](https://cinsscore.com/list/ci-badguys.txt), [Blocklist.de](https://www.blocklist.de/en/index.html), and dynamic [Fail2ban](https://github.com/fail2ban/fail2ban) jails with a near-zero memory footprint.
 
 ## Core Capabilities
 
@@ -42,16 +42,6 @@ SysWarden includes a built-in, secure HTTPS UI to monitor your server's telemetr
 * Review active jail allocations and memory usage.
 
 *(Accessible via `https://<YOUR_SERVER_IP>:9999` after installation).*
-
-## Release v1.96: Threat Intelligence Reporting Standardization
-
-This release focuses on unifying and hardening the AbuseIPDB automated reporting engine across all supported operating systems, specifically bringing the Slackware deployment up to the universal standard.
-
-### Core Changes & Enhancements
-- **Reporting Engine Standardization**: The `setup_abuse_reporting` function within the Slackware deployment script has been completely aligned with the Universal and Alpine builds, ensuring a unified cross-platform codebase.
-- **API Payload Deduplication**: Implemented strict array deduplication (`list(set(cats))`) for AbuseIPDB threat categories prior to dispatch. This prevents `HTTP 422 Unprocessable Entity` API errors caused by redundant category tags.
-- **Enhanced OSINT Context**: Replaced raw port numbers with explicit attack context labels (`BLOCK` vs `DOCKER` routing) in the automated abuse reports. This increases the actionable value of the threat intelligence feed while reducing unnecessary data exposure.
-- **Daemon Stability**: Standardized the continuous log monitoring loop (`while True:`) across all environments, improving the reliability of the Python-based reporting daemon.
 
 ## Quick Start
 
