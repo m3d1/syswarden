@@ -74,6 +74,18 @@ chmod +x *.sh
 ./install-syswarden-slackware.sh
 ```
 
+## ⚙️ Automated Deployments (CI/CD & Fleet Management)
+
+For large-scale infrastructures and Infrastructure as Code (IaC) environments, SysWarden supports true zero-touch, unattended installations via the **`syswarden-auto.conf`** file.
+
+* **Pre-define** your custom SSH ports, WireGuard subnets, API keys, and target blocklists without requiring any interactive prompts.
+* **Seamlessly** integrate SysWarden into your CI/CD pipelines, Ansible playbooks, Terraform modules, or cloud-init bootstrap scripts.
+* **Simply** edit the `syswarden-auto.conf` template with your environmental variables and execute the installer with the `syswarden-auto.conf` flag:
+
+```bash
+./install-syswarden*.sh syswarden-auto.conf
+```
+
 ## 🛡️ Target: €3,000/year to fuel continuous DevSecOps innovation
 
 Developing **SysWarden** and curating the zero-false-positive **Data-Shield IPv4 Blocklists** requires dedicated server infrastructure and non-stop threat monitoring. 
