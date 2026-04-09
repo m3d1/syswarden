@@ -10,8 +10,6 @@
 
 **An ultra-lightweight DevSecOps firewall orchestrator for Linux.** SysWarden proactively drops 97% of malicious internet traffic by fusing Data-Shield IPv4 blocklists, GeoIP, Spamhaus ASN, Cybercrime Hosters, dynamic Fail2ban jails with a near-zero memory footprint.
 
----
-
 ## ⚡ Core Capabilities
 
 * **Drop 97% of background noise** and scanner traffic instantly at the kernel level.
@@ -28,7 +26,22 @@ SysWarden is built to run flawlessly across modern Linux infrastructures:
 * **Alpine Linux (OpenRC):** Highly optimized for lightweight containers and edge nodes.
 * **Slackware (BSD-init):** Full native support with pure UNIX flat-file tailing.
 
----
+## 🛠️ Management & Auditing Tools
+
+SysWarden comes with dedicated built-in utilities to maintain and verify your infrastructure's security lifecycle:
+
+* **`syswarden-manager.sh`**: The core administration utility. Use it to manually trigger threat-intel updates, manage your IP whitelists/blocklists, and check the firewall's operational status.
+* **`syswarden-audit.sh`**: A comprehensive DevSecOps auditing tool designed to evaluate your server's security posture, analyze logs, and verify SysWarden's architectural integrity.
+
+## 📊 The Fortress Dashboard
+
+SysWarden includes a built-in, secure HTTPS UI to monitor your server's telemetry in real-time. It operates seamlessly without heavy database requirements.
+
+* Track live Layer 3 (Kernel) & Layer 7 (Fail2ban) blocks.
+* Analyze your top OSINT attackers.
+* Review active jail allocations and memory usage.
+
+*(Accessible via `https://<YOUR_SERVER_IP>:9999` after installation).*
 
 ## 🚀 Quick Start
 
@@ -60,23 +73,6 @@ chmod +x *.sh
 ```bash
 ./install-syswarden-slackware.sh
 ```
-
-## 🛠️ Management & Auditing Tools
-
-SysWarden comes with dedicated built-in utilities to maintain and verify your infrastructure's security lifecycle:
-
-* **`syswarden-manager.sh`**: The core administration utility. Use it to manually trigger threat-intel updates, manage your IP whitelists/blocklists, and check the firewall's operational status.
-* **`syswarden-audit.sh`**: A comprehensive DevSecOps auditing tool designed to evaluate your server's security posture, analyze logs, and verify SysWarden's architectural integrity.
-
-## 📊 The Fortress Dashboard
-
-SysWarden includes a built-in, secure HTTPS UI to monitor your server's telemetry in real-time. It operates seamlessly without heavy database requirements.
-
-* Track live Layer 3 (Kernel) & Layer 7 (Fail2ban) blocks.
-* Analyze your top OSINT attackers.
-* Review active jail allocations and memory usage.
-
-*(Accessible via `https://<YOUR_SERVER_IP>:9999` after installation).*
 
 ## 🛡️ Target: €3,000/year to fuel continuous DevSecOps innovation
 
