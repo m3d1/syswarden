@@ -34,7 +34,7 @@ CONF_FILE="/etc/syswarden.conf"
 SET_NAME="syswarden_blacklist"
 TMP_DIR=$(mktemp -d)
 # shellcheck disable=SC2034
-VERSION="v1.97"
+VERSION="v2.00"
 ACTIVE_PORTS=""
 SYSWARDEN_DIR="/etc/syswarden"
 WHITELIST_FILE="$SYSWARDEN_DIR/whitelist.txt"
@@ -2042,6 +2042,37 @@ bantime  = 48h
 EOF
         fi
 
+        # 45. DYNAMIC DETECTION: GENERIC BRUTE-FORCE & PASSWORD SPRAYING (HTML/PHP LOGINS)
+        # Relies on $RCE_LOGS aggregated earlier in the script
+        if [[ -n "${RCE_LOGS:-}" ]]; then
+            log "INFO" "Web access logs detected. Enabling Generic Brute-Force & Password Spraying Guard."
+
+            # Create Filter for generic login endpoints
+            # Catches POST requests to common auth endpoints returning 200 (form reload on fail), 401, or 403
+            if [[ ! -f "/etc/fail2ban/filter.d/syswarden-generic-auth.conf" ]]; then
+                cat <<'EOF' >/etc/fail2ban/filter.d/syswarden-generic-auth.conf
+[Definition]
+failregex = ^<HOST> \S+ \S+ \[.*?\] "POST .*(?:/login|/sign-in|/signin|/log-in|/auth|/authenticate|/admin/login|/user/login|/member/login)[^ ]*(?:\.php|\.html|\.htm|\.jsp|\.aspx)? HTTP/.*" (?:200|401|403) .*$
+ignoreregex = 
+EOF
+            fi
+
+            cat <<EOF >>/etc/fail2ban/jail.local
+
+# --- Generic Web Authentication Brute-Force & Password Spraying Protection ---
+[syswarden-generic-auth]
+enabled  = true
+port     = http,https
+filter   = syswarden-generic-auth
+logpath  = $RCE_LOGS
+backend  = auto
+# Policy: 5 failed login attempts (or password spraying hits) within 10 minutes = 24h ban
+maxretry = 5
+findtime = 10m
+bantime  = 24h
+EOF
+        fi
+
         if [[ ! -f /var/log/fail2ban.log ]]; then
             touch /var/log/fail2ban.log
             chmod 640 /var/log/fail2ban.log
@@ -2530,7 +2561,7 @@ EOF
 }
 
 # ==============================================================================
-# SYSWARDEN v1.97 - SLACKWARE SECURE DASHBOARD (BOOTSTRAP 5 / HTTPS / CSP)
+# SYSWARDEN v2.00 - SLACKWARE SECURE DASHBOARD (BOOTSTRAP 5 / HTTPS / CSP)
 # ==============================================================================
 generate_dashboard() {
     log "INFO" "Generating Dashboard UI..."
@@ -2671,7 +2702,7 @@ generate_dashboard() {
         <div class="container-fluid px-xxl-5 px-4">
             <a class="navbar-brand fw-bold nav-brand-text d-flex align-items-center gap-2" href="#">
                 <svg class="nav-brand-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
-                SYSWARDEN <span class="text-muted small font-mono" style="font-size: 0.75rem; margin-top: 4px;">v1.97</span>
+                SYSWARDEN <span class="text-muted small font-mono" style="font-size: 0.75rem; margin-top: 4px;">v2.00</span>
             </a>
             <div class="d-flex align-items-center gap-3 ms-auto">
                 <span class="d-none d-md-inline text-muted small font-mono">Sys: <strong id="sys-hostname" class="text-body">--</strong></span>
@@ -3311,11 +3342,19 @@ if [[ "$MODE" == "uninstall" ]]; then
     uninstall_syswarden
 fi
 
+# --- CLI UI: Premium ASCII Banner ---
 if [[ "$MODE" != "update" ]] && [[ "$MODE" != "uninstall" ]]; then
     clear
-    echo -e "${GREEN}#############################################################"
-    echo -e "#     SysWarden Tool Installer (Slackware $VERSION)     #"
-    echo -e "#############################################################${NC}"
+    echo -e "${BLUE}===================================================================================${NC}"
+    echo -e "${RED} ██████╗██╗   ██╗███████╗██╗    ██╗ █████╗ ██████╗ ██████╗ ███████╗███╗   ██╗${NC}"
+    echo -e "${RED}██╔════╝╚██╗ ██╔╝██╔════╝██║    ██║██╔══██╗██╔══██╗██╔══██╗██╔════╝████╗  ██║${NC}"
+    echo -e "${RED}███████╗ ╚████╔╝ ███████╗██║ █╗ ██║███████║██████╔╝██║  ██║█████╗  ██╔██╗ ██║${NC}"
+    echo -e "${RED}╚════██║  ╚██╔╝  ╚════██║██║███╗██║██╔══██║██╔══██╗██║  ██║██╔══╝  ██║╚██╗██║${NC}"
+    echo -e "${RED}███████║   ██║   ███████║╚███╔███╔╝██║  ██║██║  ██║██████╔╝███████╗██║ ╚████║${NC}"
+    echo -e "${RED}╚══════╝   ╚═╝   ╚══════╝ ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝ ╚══════╝╚═╝  ╚═══╝${NC}"
+    echo -e "${BLUE}===================================================================================${NC}"
+    echo -e "${GREEN}               Advanced Firewall & Blocklist Orchestrator | v2.00                  ${NC}"
+    echo -e "${BLUE}===================================================================================${NC}\n"
 fi
 
 check_root
@@ -3333,7 +3372,7 @@ if [[ "$MODE" != "update" ]]; then
         CYAN='\033[0;36m'
         clear
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
-        echo -e "${GREEN}${BOLD}                   SYSWARDEN v1.97 - PRE-FLIGHT CHECKLIST                     ${NC}"
+        echo -e "${GREEN}${BOLD}                   SYSWARDEN v2.00 - PRE-FLIGHT CHECKLIST                     ${NC}"
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
         echo -e "Before proceeding with the deployment, please ensure you have the following"
         echo -e "information ready. If you lack any required data, press [Ctrl+C] to abort,"
