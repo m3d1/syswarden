@@ -42,7 +42,7 @@ LOG_FILE="/var/log/syswarden-install.log"
 CONF_FILE="/etc/syswarden.conf"
 SET_NAME="syswarden_blacklist"
 TMP_DIR=$(mktemp -d)
-VERSION="v2.07"
+VERSION="v2.10"
 ACTIVE_PORTS=""
 SYSWARDEN_DIR="/etc/syswarden"
 WHITELIST_FILE="$SYSWARDEN_DIR/whitelist.txt"
@@ -134,7 +134,7 @@ install_dependencies() {
     fi
     # ==============================================================================
 
-    local deps="curl python3 py3-requests ipset fail2ban bash coreutils grep gawk sed procps logrotate ncurses whois rsyslog util-linux wireguard-tools libqrencode libqrencode-tools nginx openssl"
+    local deps="curl python3 py3-requests ipset fail2ban bash coreutils grep gawk sed procps logrotate ncurses whois rsyslog util-linux wireguard-tools libqrencode libqrencode-tools nginx openssl rsync openssh-client"
 
     if [[ "$FIREWALL_BACKEND" == "nftables" ]]; then
         deps="$deps nftables"
@@ -175,6 +175,7 @@ install_dependencies() {
     # Force rsyslog to write all Netfilter/Nftables drops and Auth logs to DEDICATED files.
     # This prevents unprivileged users from injecting fake logs via logger(1)
     # into /var/log/messages, stopping Fail2ban Log Injection & Mass DoS attacks.
+    rm -f /etc/rsyslog.d/99-syswarden-siem.conf 2>/dev/null || true
     if [[ -f /etc/rsyslog.conf ]]; then
         # 1. Isolate Kernel Firewall logs
         sed -i '/^kern\./d' /etc/rsyslog.conf
@@ -507,6 +508,67 @@ define_asnblocking() {
     fi
     echo "BLOCK_ASNS='$BLOCK_ASNS'" >>"$CONF_FILE"
     echo "USE_SPAMHAUS_ASN='$USE_SPAMHAUS_ASN'" >>"$CONF_FILE"
+}
+
+define_ha_cluster() {
+    if [[ "${1:-}" == "update" ]] && [[ -f "$CONF_FILE" ]]; then
+        if [[ -z "${HA_ENABLED:-}" ]]; then HA_ENABLED="n"; fi
+        log "INFO" "Update Mode: Preserving HA Cluster setting ($HA_ENABLED)"
+        return
+    fi
+
+    echo -e "\n${BLUE}=== Step: High Availability Cluster (HA Sync) ===${NC}"
+
+    if [[ "${1:-}" == "auto" ]]; then
+        HA_ENABLED=${SYSWARDEN_HA_ENABLED:-n}
+        HA_PEER_IP=${SYSWARDEN_HA_PEER_IP:-""}
+        log "INFO" "Auto Mode: HA choice loaded via env var."
+    else
+        echo "SysWarden can automatically replicate its threat intelligence state to a standby node."
+        read -p "Enable HA Cluster Sync? (y/N): " input_ha
+
+        if [[ "$input_ha" =~ ^[Yy]$ ]]; then
+            HA_ENABLED="y"
+            read -p "Enter Standby Node IP (Must be accessible via SSH keys): " HA_PEER_IP
+        else
+            HA_ENABLED="n"
+        fi
+    fi
+
+    echo "HA_ENABLED='$HA_ENABLED'" >>"$CONF_FILE"
+
+    if [[ "$HA_ENABLED" == "y" ]] && [[ -n "$HA_PEER_IP" ]]; then
+        echo "HA_PEER_IP='$HA_PEER_IP'" >>"$CONF_FILE"
+
+        log "INFO" "Configuring HA Synchronization Engine..."
+        local SYNC_SCRIPT="/usr/local/bin/syswarden-sync.sh"
+
+        cat <<EOF >"$SYNC_SCRIPT"
+#!/bin/bash
+# SysWarden HA State Synchronization
+# Runs securely via Cron to replicate states to the standby node
+
+PEER="$HA_PEER_IP"
+SSH_PORT="${SSH_PORT:-22}"
+
+# 1. Sync custom lists
+rsync -a -e "ssh -p \$SSH_PORT -o StrictHostKeyChecking=no" /etc/syswarden/whitelist.txt /etc/syswarden/blocklist.txt root@\$PEER:/etc/syswarden/ 2>/dev/null
+
+# 2. Trigger remote reload securely
+ssh -p \$SSH_PORT -o StrictHostKeyChecking=no root@\$PEER "/usr/local/bin/syswarden-telemetry.sh >/dev/null 2>&1" 2>/dev/null
+EOF
+        chmod +x "$SYNC_SCRIPT"
+
+        if ! crontab -l 2>/dev/null | grep -q "syswarden-sync"; then
+            (
+                crontab -l 2>/dev/null || true
+                echo "*/30 * * * * $SYNC_SCRIPT >/dev/null 2>&1"
+            ) | crontab -
+        fi
+        log "INFO" "HA Cluster Sync ENABLED. Target: $HA_PEER_IP"
+    else
+        log "INFO" "HA Cluster Sync DISABLED."
+    fi
 }
 
 auto_whitelist_admin() {
@@ -957,7 +1019,11 @@ apply_firewall_rules() {
     # -----------------------------------
 
     if [[ "$FIREWALL_BACKEND" == "nftables" ]]; then
-        log "INFO" "Configuring Nftables via Atomic Transaction (Alpine Flat Syntax)..."
+        log "INFO" "Configuring Nftables via Atomic Transaction (Alpine Flat Syntax + Hardware Drop L2)..."
+
+        local ACTIVE_IF
+        ACTIVE_IF=$(ip route get 8.8.8.8 2>/dev/null | awk '{print $5}' | head -n 1)
+        [[ -z "$ACTIVE_IF" ]] && ACTIVE_IF="eth0"
 
         rc-update add nftables default >/dev/null 2>&1 || true
         rc-service nftables start >/dev/null 2>&1 || true
@@ -965,15 +1031,41 @@ apply_firewall_rules() {
         cat <<EOF >"$TMP_DIR/syswarden.nft"
 add table inet syswarden_table
 flush table inet syswarden_table
-add set inet syswarden_table $SET_NAME { type ipv4_addr; flags interval; auto-merge; }
+add table netdev syswarden_hw_drop
+flush table netdev syswarden_hw_drop
+
+add set netdev syswarden_hw_drop $SET_NAME { type ipv4_addr; flags interval; auto-merge; }
 EOF
 
         if [[ "${GEOBLOCK_COUNTRIES:-none}" != "none" ]] && [[ -s "$GEOIP_FILE" ]]; then
-            echo "add set inet syswarden_table $GEOIP_SET_NAME { type ipv4_addr; flags interval; auto-merge; }" >>"$TMP_DIR/syswarden.nft"
+            echo "add set netdev syswarden_hw_drop $GEOIP_SET_NAME { type ipv4_addr; flags interval; auto-merge; }" >>"$TMP_DIR/syswarden.nft"
         fi
 
         if [[ "${BLOCK_ASNS:-none}" != "none" ]] && [[ -s "$ASN_FILE" ]]; then
-            echo "add set inet syswarden_table $ASN_SET_NAME { type ipv4_addr; flags interval; auto-merge; }" >>"$TMP_DIR/syswarden.nft"
+            echo "add set netdev syswarden_hw_drop $ASN_SET_NAME { type ipv4_addr; flags interval; auto-merge; }" >>"$TMP_DIR/syswarden.nft"
+        fi
+
+        cat <<EOF >>"$TMP_DIR/syswarden.nft"
+add chain netdev syswarden_hw_drop ingress_frontline { type filter hook ingress device "$ACTIVE_IF" priority -500; policy accept; }
+EOF
+
+        if [[ -s "$WHITELIST_FILE" ]]; then
+            while IFS= read -r wl_ip; do
+                [[ -z "$wl_ip" ]] && continue
+                echo "add rule netdev syswarden_hw_drop ingress_frontline ip saddr $wl_ip accept" >>"$TMP_DIR/syswarden.nft"
+            done <"$WHITELIST_FILE"
+        fi
+
+        cat <<EOF >>"$TMP_DIR/syswarden.nft"
+add rule netdev syswarden_hw_drop ingress_frontline ip saddr @$SET_NAME log prefix "[SysWarden-BLOCK] " drop
+EOF
+
+        if [[ "${GEOBLOCK_COUNTRIES:-none}" != "none" ]] && [[ -s "$GEOIP_FILE" ]]; then
+            echo "add rule netdev syswarden_hw_drop ingress_frontline ip saddr @$GEOIP_SET_NAME log prefix \"[SysWarden-GEO] \" drop" >>"$TMP_DIR/syswarden.nft"
+        fi
+
+        if [[ "${BLOCK_ASNS:-none}" != "none" ]] && [[ -s "$ASN_FILE" ]]; then
+            echo "add rule netdev syswarden_hw_drop ingress_frontline ip saddr @$ASN_SET_NAME log prefix \"[SysWarden-ASN] \" drop" >>"$TMP_DIR/syswarden.nft"
         fi
 
         cat <<EOF >>"$TMP_DIR/syswarden.nft"
@@ -994,21 +1086,6 @@ EOF
             echo "add rule inet syswarden_table input tcp dport ${SSH_PORT:-22} log prefix \"[SysWarden-SSH-DROP] \" drop" >>"$TMP_DIR/syswarden.nft"
         fi
 
-        if [[ "${GEOBLOCK_COUNTRIES:-none}" != "none" ]] && [[ -s "$GEOIP_FILE" ]]; then
-            echo "add rule inet syswarden_table input ip saddr @$GEOIP_SET_NAME log prefix \"[SysWarden-GEO] \" drop" >>"$TMP_DIR/syswarden.nft"
-        fi
-
-        if [[ "${BLOCK_ASNS:-none}" != "none" ]] && [[ -s "$ASN_FILE" ]]; then
-            echo "add rule inet syswarden_table input ip saddr @$ASN_SET_NAME log prefix \"[SysWarden-ASN] \" drop" >>"$TMP_DIR/syswarden.nft"
-        fi
-
-        # --- HOTFIX: NO CATCH-ALL HERE ---
-        # The Catch-All Drop and Active Ports allow are delegated to the native OS table (priority 0)
-        # This guarantees Fail2ban (priority -1) can inspect and reject traffic.
-        cat <<EOF >>"$TMP_DIR/syswarden.nft"
-add rule inet syswarden_table input ip saddr @$SET_NAME log prefix "[SysWarden-BLOCK] " drop
-EOF
-
         log "INFO" "Populating Nftables sets atomically in chunks (Bypassing memory limits)..."
         # --- HOTFIX: AWK BATCH INJECTION (Anti-ARG_MAX & Anti-OOM) ---
 
@@ -1017,7 +1094,7 @@ EOF
             BEGIN { c=0 }
             {
                 if ($1 == "") next;
-                if (c == 0) printf "add element inet syswarden_table %s { %s", set_name, $1
+                if (c == 0) printf "add element netdev syswarden_hw_drop %s { %s", set_name, $1
                 else printf ", %s", $1
                 c++
                 if (c >= 2500) { printf " }\n"; c=0 }
@@ -1030,7 +1107,7 @@ EOF
             BEGIN { c=0 }
             {
                 if ($1 == "") next;
-                if (c == 0) printf "add element inet syswarden_table %s { %s", set_name, $1
+                if (c == 0) printf "add element netdev syswarden_hw_drop %s { %s", set_name, $1
                 else printf ", %s", $1
                 c++
                 if (c >= 2500) { printf " }\n"; c=0 }
@@ -1043,7 +1120,7 @@ EOF
             BEGIN { c=0 }
             {
                 if ($1 == "") next;
-                if (c == 0) printf "add element inet syswarden_table %s { %s", set_name, $1
+                if (c == 0) printf "add element netdev syswarden_hw_drop %s { %s", set_name, $1
                 else printf ", %s", $1
                 c++
                 if (c >= 2500) { printf " }\n"; c=0 }
@@ -1171,9 +1248,9 @@ EOF
         ipset swap "${SET_NAME}_tmp" "$SET_NAME"
         ipset destroy "${SET_NAME}_tmp"
 
-        if ! iptables -C INPUT -m set --match-set "$SET_NAME" src -j DROP 2>/dev/null; then
-            iptables -I INPUT 1 -m set --match-set "$SET_NAME" src -j DROP
-            iptables -I INPUT 1 -m set --match-set "$SET_NAME" src -j LOG --log-prefix "[SysWarden-BLOCK] "
+        if ! iptables -t raw -C PREROUTING -m set --match-set "$SET_NAME" src -j DROP 2>/dev/null; then
+            iptables -t raw -I PREROUTING 1 -m set --match-set "$SET_NAME" src -j DROP
+            iptables -t raw -I PREROUTING 1 -m set --match-set "$SET_NAME" src -j LOG --log-prefix "[SysWarden-BLOCK] "
         fi
 
         # --- ASN INJECTION (Priority 2) ---
@@ -1184,9 +1261,9 @@ EOF
             ipset swap "${ASN_SET_NAME}_tmp" "$ASN_SET_NAME"
             ipset destroy "${ASN_SET_NAME}_tmp"
 
-            if ! iptables -C INPUT -m set --match-set "$ASN_SET_NAME" src -j DROP 2>/dev/null; then
-                iptables -I INPUT 1 -m set --match-set "$ASN_SET_NAME" src -j DROP
-                iptables -I INPUT 1 -m set --match-set "$ASN_SET_NAME" src -j LOG --log-prefix "[SysWarden-ASN] "
+            if ! iptables -t raw -C PREROUTING -m set --match-set "$ASN_SET_NAME" src -j DROP 2>/dev/null; then
+                iptables -t raw -I PREROUTING 1 -m set --match-set "$ASN_SET_NAME" src -j DROP
+                iptables -t raw -I PREROUTING 1 -m set --match-set "$ASN_SET_NAME" src -j LOG --log-prefix "[SysWarden-ASN] "
             fi
         fi
 
@@ -1198,9 +1275,9 @@ EOF
             ipset swap "${GEOIP_SET_NAME}_tmp" "$GEOIP_SET_NAME"
             ipset destroy "${GEOIP_SET_NAME}_tmp"
 
-            if ! iptables -C INPUT -m set --match-set "$GEOIP_SET_NAME" src -j DROP 2>/dev/null; then
-                iptables -I INPUT 1 -m set --match-set "$GEOIP_SET_NAME" src -j DROP
-                iptables -I INPUT 1 -m set --match-set "$GEOIP_SET_NAME" src -j LOG --log-prefix "[SysWarden-GEO] "
+            if ! iptables -t raw -C PREROUTING -m set --match-set "$GEOIP_SET_NAME" src -j DROP 2>/dev/null; then
+                iptables -t raw -I PREROUTING 1 -m set --match-set "$GEOIP_SET_NAME" src -j DROP
+                iptables -t raw -I PREROUTING 1 -m set --match-set "$GEOIP_SET_NAME" src -j LOG --log-prefix "[SysWarden-GEO] "
             fi
         fi
 
@@ -3159,7 +3236,7 @@ def monitor_logs():
         proc_f2b.stdout.fileno(): 'f2b'
     }
 
-    # v2.07 Logic: STRICT filter on [SysWarden-BLOCK] only.
+    # v2.10 Logic: STRICT filter on [SysWarden-BLOCK] only.
     regex_fw = re.compile(r"\[SysWarden-BLOCK\].*?SRC=([\d\.]+).*?DPT=(\d+)")
     regex_f2b = re.compile(r"\[([a-zA-Z0-9_-]+)\]\s+Ban\s+([\d\.]+)")
 
@@ -3321,8 +3398,65 @@ detect_protected_services() {
 }
 
 setup_siem_logging() {
-    echo -e "\n${BLUE}=== Step 6: SIEM Logging Status ===${NC}"
-    log "INFO" "Logs are ready in /var/log/messages and /var/log/fail2ban.log"
+    if [[ "${1:-}" == "update" ]] && [[ -f "$CONF_FILE" ]]; then
+        if [[ -z "${SIEM_ENABLED:-}" ]]; then SIEM_ENABLED="n"; fi
+        log "INFO" "Update Mode: Preserving SIEM Log Forwarding setting ($SIEM_ENABLED)"
+        return
+    fi
+
+    echo -e "\n${BLUE}=== Step: SIEM Log Forwarding (ISO 27001/NIS2) ===${NC}"
+    if [[ "${1:-}" == "auto" ]]; then
+        SIEM_ENABLED=${SYSWARDEN_SIEM_ENABLED:-n}
+        SIEM_IP=${SYSWARDEN_SIEM_IP:-""}
+        SIEM_PORT=${SYSWARDEN_SIEM_PORT:-514}
+        SIEM_PROTO=${SYSWARDEN_SIEM_PROTO:-udp}
+        log "INFO" "Auto Mode: SIEM config loaded via env vars."
+    else
+        echo "Forward EXCLUSIVELY Fail2ban L7 attack logs to an external SIEM?"
+        read -p "Enable SIEM Forwarding? (y/N): " response_siem
+        if [[ "$response_siem" =~ ^[Yy]$ ]]; then
+            SIEM_ENABLED="y"
+            read -p "Enter SIEM IP/Hostname: " SIEM_IP
+            read -p "Enter SIEM Port [Default: 514]: " SIEM_PORT
+            SIEM_PORT=${SIEM_PORT:-514}
+            read -p "Enter SIEM Protocol (tcp/udp) [Default: udp]: " SIEM_PROTO
+            SIEM_PROTO=${SIEM_PROTO:-udp}
+            SIEM_PROTO=$(echo "$SIEM_PROTO" | tr '[:upper:]' '[:lower:]')
+        else
+            SIEM_ENABLED="n"
+        fi
+    fi
+
+    echo "SIEM_ENABLED='$SIEM_ENABLED'" >>"$CONF_FILE"
+    if [[ "$SIEM_ENABLED" == "y" ]] && [[ -n "$SIEM_IP" ]]; then
+        echo "SIEM_IP='$SIEM_IP'" >>"$CONF_FILE"
+        echo "SIEM_PORT='$SIEM_PORT'" >>"$CONF_FILE"
+        echo "SIEM_PROTO='$SIEM_PROTO'" >>"$CONF_FILE"
+
+        log "INFO" "Configuring Rsyslog to forward ONLY Fail2ban logs to SIEM..."
+
+        cat <<EOF >/etc/rsyslog.d/99-syswarden-siem.conf
+# SysWarden SIEM Forwarder - Exclusive Fail2ban Routing
+module(load="imfile")
+
+input(type="imfile"
+      File="/var/log/fail2ban.log"
+      Tag="fail2ban"
+      Severity="warning"
+      Facility="local7")
+
+if \$programname == 'fail2ban' then {
+    action(type="omfwd" target="$SIEM_IP" port="$SIEM_PORT" protocol="$SIEM_PROTO")
+    stop
+}
+EOF
+        rc-service rsyslog restart 2>/dev/null || true
+        log "INFO" "SIEM Log Forwarding is ACTIVE. (Target: $SIEM_IP:$SIEM_PORT/$SIEM_PROTO)"
+    else
+        log "INFO" "SIEM Log Forwarding DISABLED."
+        rm -f /etc/rsyslog.d/99-syswarden-siem.conf
+        rc-service rsyslog restart 2>/dev/null || true
+    fi
 }
 
 setup_cron_autoupdate() {
@@ -3632,6 +3766,12 @@ uninstall_syswarden() {
     rm -rf /opt/syswarden 2>/dev/null || true
     # -----------------------------------------------------
 
+    log "INFO" "Removing HA Cluster Sync Engine..."
+    rm -f /usr/local/bin/syswarden-sync.sh
+    if crontab -l 2>/dev/null | grep -q "syswarden-sync"; then
+        crontab -l 2>/dev/null | grep -v "syswarden-sync" | crontab -
+    fi
+
     # 2. Remove Cron & Logrotate
     log "INFO" "Removing Maintenance Tasks..."
     sed -i '/syswarden-update/d' /etc/crontabs/root 2>/dev/null || true
@@ -3643,6 +3783,7 @@ uninstall_syswarden() {
 
     # Nftables
     if command -v nft >/dev/null; then
+        nft delete table netdev syswarden_hw_drop 2>/dev/null || true
         nft delete table inet syswarden_table 2>/dev/null || true
         # HOTFIX: Purge WG NAT table
         nft delete table inet syswarden_wg 2>/dev/null || true
@@ -3695,6 +3836,13 @@ uninstall_syswarden() {
 
     # IPSet / Iptables (Legacy)
     if command -v ipset >/dev/null; then
+        while iptables -t raw -D PREROUTING -m set --match-set "$SET_NAME" src -j DROP 2>/dev/null; do :; done
+        while iptables -t raw -D PREROUTING -m set --match-set "$SET_NAME" src -j LOG --log-prefix "[SysWarden-BLOCK] " 2>/dev/null; do :; done
+        while iptables -t raw -D PREROUTING -m set --match-set "$GEOIP_SET_NAME" src -j DROP 2>/dev/null; do :; done
+        while iptables -t raw -D PREROUTING -m set --match-set "$GEOIP_SET_NAME" src -j LOG --log-prefix "[SysWarden-GEO] " 2>/dev/null; do :; done
+        while iptables -t raw -D PREROUTING -m set --match-set "$ASN_SET_NAME" src -j DROP 2>/dev/null; do :; done
+        while iptables -t raw -D PREROUTING -m set --match-set "$ASN_SET_NAME" src -j LOG --log-prefix "[SysWarden-ASN] " 2>/dev/null; do :; done
+
         while iptables -D INPUT -m set --match-set "$SET_NAME" src -j DROP 2>/dev/null; do :; done
         while iptables -D INPUT -m set --match-set "$GEOIP_SET_NAME" src -j DROP 2>/dev/null; do :; done
         while iptables -D INPUT -m set --match-set "$ASN_SET_NAME" src -j DROP 2>/dev/null; do :; done
@@ -3750,7 +3898,7 @@ uninstall_syswarden() {
     rm -rf /var/lib/syswarden/* 2>/dev/null || true
     # -------------------------------------------------------------------------
 
-    # --- Clean up all SysWarden Fail2ban filters (Including v2.07 additions) ---
+    # --- Clean up all SysWarden Fail2ban filters (Including v2.10 additions) ---
     for filter in nginx-scanner mariadb-auth mongodb-guard syswarden-privesc syswarden-portscan \
         syswarden-revshell syswarden-aibots syswarden-badbots syswarden-httpflood syswarden-webshell \
         syswarden-sqli-xss syswarden-secretshunter syswarden-ssrf syswarden-jndi-ssti syswarden-apimapper \
@@ -3951,7 +4099,7 @@ setup_wazuh_agent() {
 }
 
 # ==============================================================================
-# SYSWARDEN v2.07 - TELEMETRY BACKEND (SERVERLESS - IP REGISTRY UPDATE)
+# SYSWARDEN v2.10 - TELEMETRY BACKEND (SERVERLESS - IP REGISTRY UPDATE)
 # ==============================================================================
 function setup_telemetry_backend() {
     log "INFO" "Installation of the advanced telemetry engine (Backend)..."
@@ -4128,7 +4276,7 @@ EOF
 }
 
 # ==============================================================================
-# SYSWARDEN v2.07 - NGINX SECURE DASHBOARD (ENTERPRISE SAAS UI / SPA / CSP)
+# SYSWARDEN v2.10 - NGINX SECURE DASHBOARD (ENTERPRISE SAAS UI / SPA / CSP)
 # ==============================================================================
 function generate_dashboard() {
     log "INFO" "Generating the Enterprise SaaS Nginx Dashboard (SPA/Sidebar/CSP)..."
@@ -4243,9 +4391,10 @@ function generate_dashboard() {
         ::-webkit-scrollbar-track { background: transparent; }
         ::-webkit-scrollbar-thumb { background: var(--sw-border); border-radius: 10px; }
         
-        /* Overrides */
+        /* Overrides - Absolute Zero Border Policy */
         .table { --bs-table-bg: transparent !important; }
         .table > :not(caption) > * > * { background-color: transparent !important; }
+        .table, .table tbody, .table tr, .table td, .table th, .table thead { border: none !important; box-shadow: none !important; }
         .ip-font { font-size: 85% !important; }
 
         /* Mobile Sidebar Overrides */
@@ -4265,7 +4414,7 @@ function generate_dashboard() {
         <div class="d-flex align-items-center gap-2 px-2 mb-5">
             <svg style="color: var(--sw-brand-icon);" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
             <span class="fs-5 fw-bold" style="color: var(--sw-brand-text); letter-spacing: -0.5px;">SYSWARDEN</span>
-            <span class="badge bg-primary bg-opacity-10 text-primary border border-primary border-opacity-25 rounded-pill font-mono small ms-auto">v2.07</span>
+            <span class="badge bg-primary bg-opacity-10 text-primary border border-primary border-opacity-25 rounded-pill font-mono small ms-auto">v2.10</span>
         </div>
 
         <nav class="flex-grow-1">
@@ -4382,7 +4531,7 @@ function generate_dashboard() {
                             <div class="card-body p-0">
                                 <div class="table-responsive table-container px-3 pb-3">
                                     <table class="table table-sm table-borderless table-hover align-middle mb-0">
-                                        <thead class="border-bottom" style="position: sticky; top: 0; background: var(--sw-card-bg); z-index: 2;">
+                                        <thead style="position: sticky; top: 0; background: var(--sw-card-bg); z-index: 2; border: none; box-shadow: none;">
                                             <tr>
                                                 <th class="text-muted small fw-normal pb-2">IP ADDRESS</th>
                                                 <th class="text-end text-muted small fw-normal pb-2">HITS</th>
@@ -4410,7 +4559,7 @@ function generate_dashboard() {
                             <div class="card-body p-0">
                                 <div class="table-responsive table-container px-3 pb-3" style="max-height: 450px;">
                                     <table class="table table-sm table-borderless table-hover align-middle mb-0">
-                                        <thead class="border-bottom" style="position: sticky; top: 0; background: var(--sw-card-bg); z-index: 2;">
+                                        <thead style="position: sticky; top: 0; background: var(--sw-card-bg); z-index: 2; border: none; box-shadow: none;">
                                             <tr>
                                                 <th class="text-muted small fw-normal pb-2">IP ADDRESS</th>
                                                 <th class="text-end text-muted small fw-normal pb-2">TARGET JAIL</th>
@@ -4654,7 +4803,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const jailsEl = document.getElementById('top-jails-list');
             if(data.layer7.jails_data.length > 0) {
                 jailsEl.innerHTML = [...data.layer7.jails_data].sort((a, b) => b.count - a.count).map(jail => `
-                    <li class="list-group-item d-flex justify-content-between align-items-center bg-transparent px-0 border-bottom border-secondary border-opacity-10 py-3">
+                    <li class="list-group-item d-flex justify-content-between align-items-center bg-transparent px-0 border-0 py-2">
                         <span class="text-body-secondary fw-medium">${jail.name}</span>
                         <span class="badge bg-secondary bg-opacity-25 text-body rounded-pill">${jail.count}</span>
                     </li>`).join('');
@@ -5311,7 +5460,7 @@ if [[ "$MODE" != "update" ]] && [[ "$MODE" != "uninstall" ]]; then
     echo -e "${RED}███████║   ██║   ███████║╚███╔███╔╝██║  ██║██║  ██║██████╔╝███████╗██║ ╚████║${NC}"
     echo -e "${RED}╚══════╝   ╚═╝   ╚══════╝ ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝ ╚══════╝╚═╝  ╚═══╝${NC}"
     echo -e "${BLUE}===================================================================================${NC}"
-    echo -e "${GREEN}               Advanced Firewall & Blocklist Orchestrator | v2.07                  ${NC}"
+    echo -e "${GREEN}               Advanced Firewall & Blocklist Orchestrator | v2.10                  ${NC}"
     echo -e "${BLUE}===================================================================================${NC}\n"
 fi
 
@@ -5332,7 +5481,7 @@ if [[ "$MODE" != "update" ]]; then
         CYAN='\033[0;36m'
         clear
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
-        echo -e "${GREEN}${BOLD}                   SYSWARDEN v2.07 - PRE-FLIGHT CHECKLIST                     ${NC}"
+        echo -e "${GREEN}${BOLD}                   SYSWARDEN v2.10 - PRE-FLIGHT CHECKLIST                     ${NC}"
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
         echo -e "Before proceeding with the deployment, please ensure you have the following"
         echo -e "information ready. If you lack any required data, press [Ctrl+C] to abort,"
@@ -5358,15 +5507,22 @@ if [[ "$MODE" != "update" ]]; then
         echo -e "   Target Autonomous System Numbers to drop (e.g., AS1234, AS5678)."
         echo -e "   Reference: ${CYAN}https://www.spamhaus.org/drop/asndrop.json${NC}"
 
-        echo -e "\n${BOLD}7. THREAT INTEL BLOCKLISTS${NC}"
+        echo -e "\n${BOLD}7. HA CLUSTER SYNC${NC} ${YELLOW}(Optional)${NC}"
+        echo -e "   Standby Node IP for automatic threat intelligence replication."
+
+        echo -e "\n${BOLD}8. THREAT INTEL BLOCKLISTS${NC}"
         echo -e "   [1] Standard (Web Servers)      [2] Critical (High Security)"
         echo -e "   [3] Custom (Plaintext URL .txt) [4] Disabled"
 
-        echo -e "\n${BOLD}8. ABUSEIPDB INTEGRATION${NC} ${YELLOW}(Optional)${NC}"
+        echo -e "\n${BOLD}9. SIEM LOG FORWARDING${NC} ${YELLOW}(Optional)${NC}"
+        echo -e "   External SIEM IP, Port (Default: 6514), and Protocol for central log auditing."
+        echo -e "   Required for strict ISO 27001 / NIS2 compliance."
+
+        echo -e "\n${BOLD}10. ABUSEIPDB INTEGRATION${NC} ${YELLOW}(Optional)${NC}"
         echo -e "   Requires a valid API Key to automatically report Layer 7 attackers."
         echo -e "   Get one at: ${CYAN}https://www.abuseipdb.com/account/api${NC}"
 
-        echo -e "\n${BOLD}9. WAZUH SIEM AGENT${NC} ${YELLOW}(Optional)${NC}"
+        echo -e "\n${BOLD}11. WAZUH SIEM AGENT${NC} ${YELLOW}(Optional)${NC}"
         echo -e "   Required: Manager IP, Enrollment Port (1515), Listen Port (1514)."
         echo -e "   If unsure about your SIEM architecture, consult your Security Admin."
 
@@ -5383,6 +5539,8 @@ if [[ "$MODE" != "update" ]]; then
     define_os_hardening "$MODE"
     define_geoblocking "$MODE"
     define_asnblocking "$MODE"
+    define_ha_cluster "$MODE"
+    setup_siem_logging "$MODE"
     configure_fail2ban
 fi
 
@@ -5430,7 +5588,6 @@ generate_dashboard
 
 if [[ "$MODE" != "update" ]]; then
     setup_wireguard
-    setup_siem_logging
     setup_abuse_reporting "$MODE"
     setup_wazuh_agent "$MODE"
     setup_cron_autoupdate "$MODE"

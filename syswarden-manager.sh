@@ -2,7 +2,7 @@
 
 # SysWarden Manager - Blocklists and Whitelists Manager
 # Copyright (C) 2026 duggytuxy - Laurent M.
-# Version: v2.07
+# Version: v2.10
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
 # the Free Software Foundation, either version 3 of the License, or
@@ -27,7 +27,7 @@ WHITELIST_FILE="$SYSWARDEN_DIR/whitelist.txt"
 BLOCKLIST_FILE="$SYSWARDEN_DIR/blocklist.txt"
 SSH_WHITELIST_FILE="$SYSWARDEN_DIR/ssh_whitelist.txt"
 SET_NAME="syswarden_blacklist"
-VERSION="v2.07"
+VERSION="v2.10"
 
 # --- ROOT ENFORCEMENT ---
 if [[ $EUID -ne 0 ]]; then
@@ -121,7 +121,7 @@ check_ip() {
 
     case "$FW_BACKEND" in
         nftables)
-            if nft get element inet syswarden_table "$SET_NAME" "{ $target_ip }" >/dev/null 2>&1; then is_blocked_fw=true; fi
+            if nft get element netdev syswarden_hw_drop "$SET_NAME" "{ $target_ip }" >/dev/null 2>&1; then is_blocked_fw=true; fi
             ;;
         firewalld | ipset | ufw)
             if ipset test "$SET_NAME" "$target_ip" >/dev/null 2>&1; then is_blocked_fw=true; fi
@@ -174,7 +174,7 @@ unblock_ip() {
 
     case "$FW_BACKEND" in
         nftables)
-            nft delete element inet syswarden_table "$SET_NAME" "{ $target_ip }" 2>/dev/null || true
+            nft delete element netdev syswarden_hw_drop "$SET_NAME" "{ $target_ip }" 2>/dev/null || true
             ;;
         firewalld)
             firewall-cmd --permanent --ipset="$SET_NAME" --remove-entry="$target_ip" >/dev/null 2>&1 || true
@@ -229,9 +229,13 @@ whitelist_ip() {
 
     case "$FW_BACKEND" in
         nftables)
+            nft insert rule netdev syswarden_hw_drop ingress_frontline ip saddr "$target_ip" accept 2>/dev/null || true
             get_nft_chain
             nft insert rule inet syswarden_table "$NFT_CHAIN" ip saddr "$target_ip" accept 2>/dev/null || true
-            nft list table inet syswarden_table >/etc/syswarden/syswarden.nft 2>/dev/null || true
+            {
+                nft list table netdev syswarden_hw_drop 2>/dev/null
+                nft list table inet syswarden_table 2>/dev/null
+            } >/etc/syswarden/syswarden.nft
             ;;
         firewalld)
             local ACTIVE_ZONE
@@ -243,6 +247,7 @@ whitelist_ip() {
             ufw insert 1 allow from "$target_ip" >/dev/null 2>&1 || true
             ;;
         ipset | unknown)
+            iptables -t raw -I PREROUTING 1 -s "$target_ip" -j ACCEPT 2>/dev/null || true
             iptables -I INPUT 1 -s "$target_ip" -j ACCEPT 2>/dev/null || true
 
             # HOTFIX: Persistence for Slackware vs Systemd environments
@@ -334,8 +339,12 @@ allow_ssh_ip() {
     case "$FW_BACKEND" in
         nftables)
             get_nft_chain
+            nft insert rule netdev syswarden_hw_drop ingress_frontline ip saddr "$target_ip" tcp dport "$SSH_PORT" accept 2>/dev/null || true
             nft insert rule inet syswarden_table "$NFT_CHAIN" ip saddr "$target_ip" tcp dport "$SSH_PORT" accept 2>/dev/null || true
-            nft list table inet syswarden_table >/etc/syswarden/syswarden.nft 2>/dev/null || true
+            {
+                nft list table netdev syswarden_hw_drop 2>/dev/null
+                nft list table inet syswarden_table 2>/dev/null
+            } >/etc/syswarden/syswarden.nft
             ;;
         firewalld)
             local ACTIVE_ZONE
@@ -347,6 +356,7 @@ allow_ssh_ip() {
             ufw insert 1 allow from "$target_ip" to any port "$SSH_PORT" proto tcp >/dev/null 2>&1 || true
             ;;
         ipset | unknown)
+            iptables -t raw -I PREROUTING 1 -p tcp -s "$target_ip" --dport "$SSH_PORT" -j ACCEPT 2>/dev/null || true
             iptables -I INPUT 1 -p tcp -s "$target_ip" --dport "$SSH_PORT" -j ACCEPT 2>/dev/null || true
 
             if [[ "$OS_TYPE" == "Slackware" ]]; then
@@ -397,12 +407,18 @@ revoke_ssh_ip() {
     case "$FW_BACKEND" in
         nftables)
             get_nft_chain
-            local handle
-            handle=$(nft -a list chain inet syswarden_table "$NFT_CHAIN" 2>/dev/null | grep -E "ip saddr $target_ip tcp dport $SSH_PORT accept" | grep -oP 'handle \K[0-9]+' | head -n 1 || true)
-            if [[ -n "$handle" ]]; then
-                nft delete rule inet syswarden_table "$NFT_CHAIN" handle "$handle" 2>/dev/null || true
-            fi
-            nft list table inet syswarden_table >/etc/syswarden/syswarden.nft 2>/dev/null || true
+            local handle_l2
+            handle_l2=$(nft -a list chain netdev syswarden_hw_drop ingress_frontline 2>/dev/null | grep -E "ip saddr $target_ip tcp dport $SSH_PORT accept" | grep -oP 'handle \K[0-9]+' | head -n 1 || true)
+            if [[ -n "$handle_l2" ]]; then nft delete rule netdev syswarden_hw_drop ingress_frontline handle "$handle_l2" 2>/dev/null || true; fi
+
+            local handle_l3
+            handle_l3=$(nft -a list chain inet syswarden_table "$NFT_CHAIN" 2>/dev/null | grep -E "ip saddr $target_ip tcp dport $SSH_PORT accept" | grep -oP 'handle \K[0-9]+' | head -n 1 || true)
+            if [[ -n "$handle_l3" ]]; then nft delete rule inet syswarden_table "$NFT_CHAIN" handle "$handle_l3" 2>/dev/null || true; fi
+
+            {
+                nft list table netdev syswarden_hw_drop 2>/dev/null
+                nft list table inet syswarden_table 2>/dev/null
+            } >/etc/syswarden/syswarden.nft
             ;;
         firewalld)
             local ACTIVE_ZONE
@@ -414,6 +430,7 @@ revoke_ssh_ip() {
             ufw delete allow from "$target_ip" to any port "$SSH_PORT" proto tcp >/dev/null 2>&1 || true
             ;;
         ipset | unknown)
+            while iptables -t raw -D PREROUTING -p tcp -s "$target_ip" --dport "$SSH_PORT" -j ACCEPT 2>/dev/null; do :; done
             while iptables -D INPUT -p tcp -s "$target_ip" --dport "$SSH_PORT" -j ACCEPT 2>/dev/null; do :; done
 
             if [[ "$OS_TYPE" == "Slackware" ]]; then
@@ -454,7 +471,7 @@ block_ip() {
 
     case "$FW_BACKEND" in
         nftables)
-            nft add element inet syswarden_table "$SET_NAME" "{ $target_ip }" 2>/dev/null || true
+            nft add element netdev syswarden_hw_drop "$SET_NAME" "{ $target_ip }" 2>/dev/null || true
             ;;
         firewalld)
             firewall-cmd --permanent --ipset="$SET_NAME" --add-entry="$target_ip" >/dev/null 2>&1 || true

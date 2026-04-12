@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# SysWarden v2.07 - DevSecOps Audit & Compliance Tool
+# SysWarden v2.10 - DevSecOps Audit & Compliance Tool
 # Copyright (C) 2026 duggytuxy - Laurent M.
 #
 # This program is free software: you can redistribute it and/or modify
@@ -135,13 +135,13 @@ fi
 
 # Pre-detect Firewall Engine globally to prevent crashes in partial audits
 FW_ENGINE="Unknown"
-if command -v nft >/dev/null && nft list table inet syswarden_table >/dev/null 2>&1; then
+if command -v nft >/dev/null && { nft list table inet syswarden_table >/dev/null 2>&1 || nft list table netdev syswarden_hw_drop >/dev/null 2>&1; }; then
     FW_ENGINE="Nftables"
 elif command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then
     FW_ENGINE="Firewalld"
 elif command -v ufw >/dev/null && ufw status | grep "Status: active" >/dev/null 2>&1 && grep "syswarden" /etc/ufw/before.rules >/dev/null 2>&1; then
     FW_ENGINE="UFW"
-elif command -v iptables >/dev/null && iptables -n -L INPUT | grep "SysWarden" >/dev/null 2>&1; then
+elif command -v iptables >/dev/null && { iptables -t raw -n -L PREROUTING 2>/dev/null | grep "SysWarden" >/dev/null 2>&1 || iptables -n -L INPUT | grep "SysWarden" >/dev/null 2>&1; }; then
     FW_ENGINE="Iptables"
 fi
 
@@ -188,18 +188,19 @@ elif [[ "$AUDIT_MODE" == "2" ]]; then
     echo -e "  5) Phase 5: DevSecOps Telemetry & Enterprise Dashboard"
     echo -e "  6) Phase 6: Zero Trust Remote Access (VPN & SSH Cloaking)"
     echo -e "  7) Phase 7: Exposed Services & Firewall Persistence (CSPM)"
-    echo -e "  8) Phase 8: Ghost Rules & Firewall Idempotency (Anti-Duplication)"
+    echo -e "  8) Phase 8: Enterprise SOC & High Availability (HA Cluster)"
+    echo -e "  9) Phase 9: Ghost Rules & Firewall Idempotency (Anti-Duplication)"
     echo ""
 
     # Strict Input Validation Loop for Multiple Phases
     while true; do
-        read -rp "Enter phase numbers separated by space (e.g., 1 3 8): " RAW_PHASES
+        read -rp "Enter phase numbers separated by space (e.g., 1 3 9): " RAW_PHASES
 
         # Sanitize input
         CLEAN_PHASES=$(echo "$RAW_PHASES" | tr ',' ' ' | tr -s ' ')
 
         # Regex validation
-        if [[ "$CLEAN_PHASES" =~ ^[1-8\ ]+$ ]]; then
+        if [[ "$CLEAN_PHASES" =~ ^[1-9\ ]+$ ]]; then
             if [[ -n "${CLEAN_PHASES// /}" ]]; then
                 USER_PHASES=" $CLEAN_PHASES "
                 break
@@ -371,6 +372,22 @@ if [[ "$RUN_ALL" -eq 1 || "$USER_PHASES" == *" 3 "* ]]; then
 
     if [[ "$FW_ENGINE" != "Unknown" ]]; then
         pass "Firewall Engine ($FW_ENGINE) is active and strictly enforcing SysWarden rules."
+
+        if [[ "$FW_ENGINE" == "Nftables" ]]; then
+            TOTAL=$((TOTAL + 1))
+            if nft list table netdev syswarden_hw_drop >/dev/null 2>&1; then
+                pass "Nftables Layer 2 Hardware Acceleration (netdev syswarden_hw_drop) is ACTIVE."
+            else
+                fail "Nftables Layer 2 Hardware Acceleration is MISSING or failed to load."
+            fi
+        elif [[ "$FW_ENGINE" == "Iptables" ]]; then
+            TOTAL=$((TOTAL + 1))
+            if iptables -t raw -n -L PREROUTING 2>/dev/null | grep -q "SysWarden-BLOCK"; then
+                pass "IPtables Layer 3 Pre-Routing (table raw) IPS acceleration is ACTIVE."
+            else
+                warn "IPtables is active but using slower Layer 3 INPUT instead of Pre-Routing."
+            fi
+        fi
     else
         fail "SysWarden firewall rules not found in kernel space."
     fi
@@ -812,10 +829,41 @@ if [[ "$RUN_ALL" -eq 1 || "$USER_PHASES" == *" 7 "* ]]; then
 fi
 
 # ==============================================================================
-# --- Phase 8: Ghost Rules & Firewall Idempotency (Anti-Duplication) ---
+# --- Phase 8: Enterprise SOC & HA Integration ---
 # ==============================================================================
 if [[ "$RUN_ALL" -eq 1 || "$USER_PHASES" == *" 8 "* ]]; then
-    log_header "Phase 8: Ghost Rules & Firewall Idempotency (Anti-Duplication)"
+    log_header "Phase 8: Enterprise SOC & HA Integration"
+
+    # 1. HA Cluster Sync
+    if [[ -f "/usr/local/bin/syswarden-sync.sh" ]]; then
+        TOTAL=$((TOTAL + 1))
+        if crontab -l 2>/dev/null | grep -q "syswarden-sync"; then
+            pass "HA Cluster Sync is ACTIVE and securely scheduled in Cron."
+        else
+            fail "HA Cluster Sync script exists but is missing from Cron schedule."
+        fi
+    else
+        info "HA Cluster Sync is not configured (Skipped by user)."
+    fi
+
+    # 2. SIEM Log Forwarding (Rsyslog)
+    if [[ -f "/etc/rsyslog.d/99-syswarden-siem.conf" ]]; then
+        TOTAL=$((TOTAL + 1))
+        if grep -q "@@\|@" "/etc/rsyslog.d/99-syswarden-siem.conf"; then
+            pass "SIEM Log Forwarding (ISO 27001/NIS2) is ACTIVE and configured."
+        else
+            fail "SIEM Log Forwarding configuration exists but lacks a valid target destination."
+        fi
+    else
+        info "SIEM Log Forwarding is not configured (Skipped by user)."
+    fi
+fi
+
+# ==============================================================================
+# --- Phase 9: Ghost Rules & Firewall Idempotency (Anti-Duplication) ---
+# ==============================================================================
+if [[ "$RUN_ALL" -eq 1 || "$USER_PHASES" == *" 9 "* ]]; then
+    log_header "Phase 9: Ghost Rules & Firewall Idempotency (Anti-Duplication)"
 
     GHOST_DETECTED=0
 
@@ -876,7 +924,7 @@ if [[ "$RUN_ALL" -eq 1 || "$USER_PHASES" == *" 8 "* ]]; then
 fi
 
 # ==============================================================================
-# --- 9. AUDIT SUMMARY ---
+# --- 10. AUDIT SUMMARY ---
 # ==============================================================================
 echo -e "\n${BOLD}==============================================================================${NC}"
 
