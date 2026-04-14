@@ -33,7 +33,7 @@ LOG_FILE="/var/log/syswarden-install.log"
 CONF_FILE="/etc/syswarden.conf"
 SET_NAME="syswarden_blacklist"
 TMP_DIR=$(mktemp -d)
-VERSION="v2.15"
+VERSION="v2.16"
 ACTIVE_PORTS=""
 SYSWARDEN_DIR="/etc/syswarden"
 WHITELIST_FILE="$SYSWARDEN_DIR/whitelist.txt"
@@ -143,6 +143,9 @@ install_dependencies() {
     fi
 
     if ! command -v curl >/dev/null; then missing_common+=("curl"); fi
+    # --- HOTFIX: WGET DEPENDENCY (Required for UI Fonts & Upgrades) ---
+    if ! command -v wget >/dev/null; then missing_common+=("wget"); fi
+    # ------------------------------------------------------------------
     if ! command -v python3 >/dev/null; then missing_common+=("python3"); fi
     if ! command -v whois >/dev/null; then missing_common+=("whois"); fi
     # --- FIX: Added 'jq' dependency required for telemetry JSON generation ---
@@ -363,6 +366,88 @@ define_ssh_port() {
 
     echo "SSH_PORT='$SSH_PORT'" >>"$CONF_FILE"
     log "INFO" "SSH Port configured as: $SSH_PORT"
+}
+
+# --- FIREWALL ENGINE OPTIMIZATION (RHEL/ALMA/FEDORA) ---
+define_firewall_engine() {
+    local mode="$1"
+
+    # Do not execute during standard upgrades
+    if [[ "$mode" == "update" ]]; then return; fi
+
+    # Check if Firewalld is active OR enabled on boot (The real dictator)
+    if command -v firewall-cmd >/dev/null && { systemctl is-active --quiet firewalld 2>/dev/null || systemctl is-enabled firewalld 2>/dev/null | grep -q "enabled"; }; then
+
+        # --- AUTOMATED MODE (CI/CD & Cloud-init) ---
+        if [[ "$mode" == "auto" ]]; then
+            local backend_choice="${SYSWARDEN_FIREWALL_BACKEND:-keep}"
+
+            if [[ "$backend_choice" == "nftables" ]]; then
+                log "INFO" "Auto-Deploy: Bypassing Firewalld for pure Nftables..."
+                systemctl disable --now firewalld >/dev/null 2>&1 || true
+                systemctl enable --now nftables >/dev/null 2>&1 || true
+                FIREWALL_BACKEND="nftables"
+            elif [[ "$backend_choice" == "iptables" ]]; then
+                log "INFO" "Auto-Deploy: Bypassing Firewalld for classic Iptables..."
+                systemctl disable --now firewalld >/dev/null 2>&1 || true
+                if command -v dnf >/dev/null; then
+                    dnf install -y iptables-services >/dev/null 2>&1 || true
+                elif command -v yum >/dev/null; then
+                    yum install -y iptables-services >/dev/null 2>&1 || true
+                fi
+                systemctl enable --now iptables >/dev/null 2>&1 || true
+                FIREWALL_BACKEND="iptables"
+            else
+                log "INFO" "Auto-Deploy: Keeping Firewalld active."
+            fi
+            return
+        fi
+
+        # --- INTERACTIVE MODE ---
+        echo -e "\n${BLUE}=== Step: Firewall Engine Optimization ===${NC}"
+        echo -e "${YELLOW}WARNING: Firewalld is currently managing your network rules.${NC}"
+        echo -e "Because Firewalld uses D-Bus, injecting massive Threat Intelligence blocklists"
+        echo -e "(100k+ IPs) can cause severe CPU bottlenecks and extremely slow reload times."
+        echo -e "For production servers, we highly recommend bypassing Firewalld and using"
+        echo -e "pure Nftables or classic Iptables directly in the kernel."
+
+        local swap_fw
+        read -p "Do you want SysWarden to replace Firewalld natively? (y/N): " swap_fw
+        if [[ "$swap_fw" =~ ^[Yy]$ ]]; then
+            echo -e "\nChoose your target Kernel backend:"
+            echo -e "  1) Nftables (Modern, Recommended, Hardware Offload support)"
+            echo -e "  2) Iptables (Classic SysAdmin choice, via iptables-services)"
+
+            local fw_choice
+            while true; do
+                read -p "Select backend [1-2]: " fw_choice
+                if [[ "$fw_choice" =~ ^[1-2]$ ]]; then break; fi
+            done
+
+            log "INFO" "Stopping and safely disabling Firewalld..."
+            systemctl disable --now firewalld >/dev/null 2>&1 || true
+
+            if [[ "$fw_choice" == "2" ]]; then
+                log "INFO" "Installing and enabling classic Iptables persistence..."
+                if command -v dnf >/dev/null; then
+                    dnf install -y iptables-services >/dev/null 2>&1 || true
+                elif command -v yum >/dev/null; then
+                    yum install -y iptables-services >/dev/null 2>&1 || true
+                fi
+                systemctl enable --now iptables >/dev/null 2>&1 || true
+                FIREWALL_BACKEND="iptables"
+                log "INFO" "Engine swapped: IPtables Active. Firewalld bypassed."
+            else
+                log "INFO" "Enabling pure Nftables persistence..."
+                systemctl enable --now nftables >/dev/null 2>&1 || true
+                FIREWALL_BACKEND="nftables"
+                log "INFO" "Engine swapped: Nftables Active. Firewalld bypassed."
+            fi
+        else
+            echo -e "${YELLOW}Keeping Firewalld. Note: Firewall reload operations will take longer.${NC}"
+            log "INFO" "User opted to keep Firewalld despite performance warnings."
+        fi
+    fi
 }
 
 define_wireguard() {
@@ -1437,7 +1522,7 @@ EOF
             # 3. Allow WireGuard UDP port for tunnel establishment
             firewall-cmd --permanent --add-port="${WG_PORT:-51820}/udp" >/dev/null 2>&1 || true
 
-            # --- STRICT ZERO TRUST HIERARCHY (v2.15) - DEBIAN PARITY) ---
+            # --- STRICT ZERO TRUST HIERARCHY (v2.16) - DEBIAN PARITY) ---
 
             # Priority -1000: Highest priority. Allow SSH & Dashboard strictly from VPN.
             firewall-cmd --permanent --add-rich-rule="rule priority='-1000' family='ipv4' source address='${WG_SUBNET}' port port='${SSH_PORT:-22}' protocol='tcp' accept" >/dev/null 2>&1 || true
@@ -4628,7 +4713,7 @@ uninstall_syswarden() {
     rm -rf /var/log/syswarden/* 2>/dev/null || true
     # ----------------------------------------------------------------
 
-    # --- Clean up all SysWarden Fail2ban filters (Including v2.15 additions) ---
+    # --- Clean up all SysWarden Fail2ban filters (Including v2.16 additions) ---
     for filter in nginx-scanner mariadb-auth mongodb-guard syswarden-privesc syswarden-portscan \
         syswarden-revshell syswarden-aibots syswarden-badbots syswarden-httpflood syswarden-webshell \
         syswarden-sqli-xss syswarden-secretshunter syswarden-ssrf syswarden-jndi-ssti syswarden-apimapper \
@@ -4920,7 +5005,7 @@ EOF
 }
 
 # ==============================================================================
-# SYSWARDEN v2.15 - TELEMETRY BACKEND (SERVERLESS - IP REGISTRY UPDATE)
+# SYSWARDEN v2.16 - TELEMETRY BACKEND (SERVERLESS - IP REGISTRY UPDATE)
 # ==============================================================================
 function setup_telemetry_backend() {
     log "INFO" "Installation of the advanced telemetry engine (Backend)..."
@@ -5090,7 +5175,7 @@ EOF
 }
 
 # ==============================================================================
-# SYSWARDEN v2.15 - NGINX SECURE DASHBOARD (ENTERPRISE SAAS UI / SPA / CSP)
+# SYSWARDEN v2.16 - NGINX SECURE DASHBOARD (ENTERPRISE SAAS UI / SPA / CSP)
 # ==============================================================================
 function generate_dashboard() {
     log "INFO" "Generating the Enterprise SaaS Nginx Dashboard (SPA/Sidebar/CSP)..."
@@ -5228,7 +5313,7 @@ function generate_dashboard() {
         <div class="d-flex align-items-center gap-2 px-2 mb-5">
             <svg style="color: var(--sw-brand-icon);" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
             <span class="fs-5 fw-bold" style="color: var(--sw-brand-text); letter-spacing: -0.5px;">SYSWARDEN</span>
-            <span class="badge bg-primary bg-opacity-10 text-primary border border-primary border-opacity-25 rounded-pill font-mono small ms-auto">v2.15</span>
+            <span class="badge bg-primary bg-opacity-10 text-primary border border-primary border-opacity-25 rounded-pill font-mono small ms-auto">v2.16</span>
         </div>
 
         <nav class="flex-grow-1">
@@ -6394,7 +6479,7 @@ if [[ "$MODE" != "update" ]] && [[ "$MODE" != "uninstall" ]]; then
     echo -e "${RED}███████║   ██║   ███████║╚███╔███╔╝██║  ██║██║  ██║██████╔╝███████╗██║ ╚████║${NC}"
     echo -e "${RED}╚══════╝   ╚═╝   ╚══════╝ ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝ ╚══════╝╚═╝  ╚═══╝${NC}"
     echo -e "${BLUE}===================================================================================${NC}"
-    echo -e "${GREEN}               Advanced Firewall & Blocklist Orchestrator | v2.15                  ${NC}"
+    echo -e "${GREEN}               Advanced Firewall & Blocklist Orchestrator | v2.16                  ${NC}"
     echo -e "${BLUE}===================================================================================${NC}\n"
 fi
 
@@ -6432,7 +6517,7 @@ if [[ "$MODE" != "update" ]]; then
         CYAN='\033[0;36m'
         clear
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
-        echo -e "${GREEN}${BOLD}                   SYSWARDEN v2.15 - PRE-FLIGHT CHECKLIST                     ${NC}"
+        echo -e "${GREEN}${BOLD}                   SYSWARDEN v2.16 - PRE-FLIGHT CHECKLIST                     ${NC}"
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
         echo -e "Before proceeding with the deployment, please ensure you have the following"
         echo -e "information ready. If you lack any required data, press [Ctrl+C] to abort,"
@@ -6441,39 +6526,43 @@ if [[ "$MODE" != "update" ]]; then
         echo -e "${BOLD}1. SSH CONFIGURATION${NC}"
         echo -e "   You will need to confirm the custom SSH port used to connect to this server."
 
-        echo -e "\n${BOLD}2. WIREGUARD VPN${NC} ${YELLOW}(Optional)${NC}"
+        echo -e "\n${BOLD}2. FIREWALL ENGINE OPTIMIZATION${NC} ${YELLOW}(RHEL/Alma/Fedora only)${NC}"
+        echo -e "   Decide whether to bypass Firewalld in favor of pure Nftables or Iptables"
+        echo -e "   for extreme performance when loading massive Threat Intelligence blocklists."
+
+        echo -e "\n${BOLD}3. WIREGUARD VPN${NC} ${YELLOW}(Optional)${NC}"
         echo -e "   Decide if you need a stealth admin VPN. If unsure, consult your SysAdmin."
 
-        echo -e "\n${BOLD}3. DOCKER INTEGRATION${NC} ${YELLOW}(Optional)${NC}"
+        echo -e "\n${BOLD}4. DOCKER INTEGRATION${NC} ${YELLOW}(Optional)${NC}"
         echo -e "   Requires Layer 3 routing adjustments for containers. If unsure, consult your SysAdmin."
 
-        echo -e "\n${BOLD}4. OS HARDENING${NC} ${YELLOW}(Optional)${NC}"
+        echo -e "\n${BOLD}5. OS HARDENING${NC} ${YELLOW}(Optional)${NC}"
         echo -e "   Strict restrictions for privileged groups (Sudo/Wheel) & Cron. Recommended for NEW servers only."
 
-        echo -e "\n${BOLD}5. GEOIP BLOCKING${NC} ${YELLOW}(Optional)${NC}"
+        echo -e "\n${BOLD}6. GEOIP BLOCKING${NC} ${YELLOW}(Optional)${NC}"
         echo -e "   ISO country codes to drop instantly (e.g., RU,CN,KP)."
         echo -e "   Reference: ${CYAN}https://www.ipdeny.com/ipblocks/${NC}"
 
-        echo -e "\n${BOLD}6. ASN BLOCKING${NC} ${YELLOW}(Optional)${NC}"
+        echo -e "\n${BOLD}7. ASN BLOCKING${NC} ${YELLOW}(Optional)${NC}"
         echo -e "   Target Autonomous System Numbers to drop (e.g., AS1234, AS5678)."
         echo -e "   Reference: ${CYAN}https://www.spamhaus.org/drop/asndrop.json${NC}"
 
-        echo -e "\n${BOLD}7. HA CLUSTER SYNC${NC} ${YELLOW}(Optional)${NC}"
+        echo -e "\n${BOLD}8. HA CLUSTER SYNC${NC} ${YELLOW}(Optional)${NC}"
         echo -e "   Standby Node IP for automatic threat intelligence replication."
 
-        echo -e "\n${BOLD}8. THREAT INTEL BLOCKLISTS${NC}"
+        echo -e "\n${BOLD}9. THREAT INTEL BLOCKLISTS${NC}"
         echo -e "   [1] Standard (Web Servers)      [2] Critical (High Security)"
         echo -e "   [3] Custom (Plaintext URL .txt) [4] Disabled"
 
-        echo -e "\n${BOLD}9. SIEM LOG FORWARDING${NC} ${YELLOW}(Optional)${NC}"
+        echo -e "\n${BOLD}10. SIEM LOG FORWARDING${NC} ${YELLOW}(Optional)${NC}"
         echo -e "   External SIEM IP, Port (Default: 6514), and Protocol for central log auditing."
         echo -e "   Required for strict ISO 27001 / NIS2 compliance."
 
-        echo -e "\n${BOLD}10. ABUSEIPDB INTEGRATION${NC} ${YELLOW}(Optional)${NC}"
+        echo -e "\n${BOLD}11. ABUSEIPDB INTEGRATION${NC} ${YELLOW}(Optional)${NC}"
         echo -e "   Requires a valid API Key to automatically report Layer 7 attackers."
         echo -e "   Get one at: ${CYAN}https://www.abuseipdb.com/account/api${NC}"
 
-        echo -e "\n${BOLD}11. WAZUH SIEM AGENT${NC} ${YELLOW}(Optional)${NC}"
+        echo -e "\n${BOLD}12. WAZUH SIEM AGENT${NC} ${YELLOW}(Optional)${NC}"
         echo -e "   Required: Manager IP, Enrollment Port (1515), Listen Port (1514)."
         echo -e "   If unsure about your SIEM architecture, consult your Security Admin."
 
@@ -6485,6 +6574,7 @@ if [[ "$MODE" != "update" ]]; then
     # ---------------------------------------------------------------
 
     define_ssh_port "$MODE"
+    define_firewall_engine "$MODE"
     define_wireguard "$MODE"
     define_docker_integration "$MODE"
     define_os_hardening "$MODE"
