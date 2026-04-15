@@ -34,7 +34,7 @@ CONF_FILE="/etc/syswarden.conf"
 SET_NAME="syswarden_blacklist"
 TMP_DIR=$(mktemp -d)
 # shellcheck disable=SC2034
-VERSION="v2.20"
+VERSION="v2.21"
 ACTIVE_PORTS=""
 SYSWARDEN_DIR="/etc/syswarden"
 WHITELIST_FILE="$SYSWARDEN_DIR/whitelist.txt"
@@ -2860,13 +2860,21 @@ if command -v fail2ban-client >/dev/null && timeout 2 fail2ban-client ping >/dev
                         if [[ "$JAIL" =~ (recidive) ]]; then
                             L7_PAYLOAD="Repeat Offender (Recidive Module)"
                         elif [[ "$JAIL" =~ (portscan) ]]; then
+                            # KERNEL / FIREWALL Jails (Detects port probing)
                             RAW_LOG=$(timeout 1 grep -h -F "$IP" /var/log/kern-firewall.log /var/log/kern.log /var/log/messages /var/log/syslog 2>/dev/null | tail -n 1 || true)
-                            DPT=$(echo "$RAW_LOG" | grep -oE 'DPT=[0-9]+' || true)
+                            
+                            # DEVSECOPS FIX: Support both kernel native (DPT=XX) and SysWarden CLI format (PORT: XX)
+                            DPT=$(echo "$RAW_LOG" | grep -oE '(DPT=[0-9]+|PORT:[ \t]*[0-9]+)' || true)
                             PROTO=$(echo "$RAW_LOG" | grep -oE 'PROTO=[A-Z]+' || true)
+                            
                             if [[ -n "$DPT" ]]; then
+                                # Normalize 'PORT: 22' into 'DPT=22' for standard UI display
+                                DPT=$(echo "$DPT" | sed 's/PORT:[ \t]*/DPT=/')
+                                [[ -z "$PROTO" ]] && PROTO="PROTO=TCP" # Assume TCP by default if missing
                                 L7_PAYLOAD="Port Scan Probe -> $PROTO $DPT"
                             else
-                                L7_PAYLOAD=$(echo "$RAW_LOG" | grep -oE '\[SysWarden-BLOCK\].*')
+                                # SAFE Fallback with '|| true' to absolutely prevent 'set -e' script crashes
+                                L7_PAYLOAD=$(echo "$RAW_LOG" | grep -oE '(SysWarden-BLOCK|SysWarden-GEO).*' || true)
                             fi
                         elif [[ "$JAIL" =~ (sqli|xss|lfi|revshell|webshell|ssti|ssrf|jndi|scan|bot|mapper|enum|hunter|flood|proxy|prestashop|atlassian|wordpress|drupal|nginx|apache) ]]; then
                             RAW_LOG=$(timeout 1 grep -h -F "$IP" /var/log/nginx/access.log /var/log/nginx/error.log /var/log/apache2/access.log /var/log/apache2/error.log /var/log/httpd/access_log /var/log/httpd/error_log 2>/dev/null | tail -n 1 || true)
@@ -2968,7 +2976,7 @@ EOF
 }
 
 # ==============================================================================
-# SYSWARDEN v2.20 - NGINX SECURE DASHBOARD (ENTERPRISE SAAS UI / SPA / CSP)
+# SYSWARDEN v2.21 - NGINX SECURE DASHBOARD (ENTERPRISE SAAS UI / SPA / CSP)
 # ==============================================================================
 function generate_dashboard() {
     log "INFO" "Generating the Enterprise SaaS Nginx Dashboard (SPA/Sidebar/CSP)..."
@@ -3108,7 +3116,7 @@ function generate_dashboard() {
         <div class="d-flex align-items-center gap-2 px-2 mb-5">
             <svg style="color: var(--sw-brand-icon);" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
             <span class="fs-5 fw-bold" style="color: var(--sw-brand-text); letter-spacing: -0.5px;">SYSWARDEN</span>
-            <span class="badge bg-primary bg-opacity-10 text-primary border border-primary border-opacity-25 rounded-pill font-mono small ms-auto">v2.20</span>
+            <span class="badge bg-primary bg-opacity-10 text-primary border border-primary border-opacity-25 rounded-pill font-mono small ms-auto">v2.21</span>
         </div>
 
         <nav class="flex-grow-1">
@@ -3934,7 +3942,7 @@ if [[ "$MODE" != "update" ]] && [[ "$MODE" != "uninstall" ]]; then
     echo -e "${RED}███████║   ██║   ███████║╚███╔███╔╝██║  ██║██║  ██║██████╔╝███████╗██║ ╚████║${NC}"
     echo -e "${RED}╚══════╝   ╚═╝   ╚══════╝ ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝ ╚══════╝╚═╝  ╚═══╝${NC}"
     echo -e "${BLUE}===================================================================================${NC}"
-    echo -e "${GREEN}               Advanced Firewall & Blocklist Orchestrator | v2.20                  ${NC}"
+    echo -e "${GREEN}               Advanced Firewall & Blocklist Orchestrator | v2.21                  ${NC}"
     echo -e "${BLUE}===================================================================================${NC}\n"
 fi
 
@@ -3953,7 +3961,7 @@ if [[ "$MODE" != "update" ]]; then
         CYAN='\033[0;36m'
         clear
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
-        echo -e "${GREEN}${BOLD}                   SYSWARDEN v2.20 - PRE-FLIGHT CHECKLIST                     ${NC}"
+        echo -e "${GREEN}${BOLD}                   SYSWARDEN v2.21 - PRE-FLIGHT CHECKLIST                     ${NC}"
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
         echo -e "Before proceeding with the deployment, please ensure you have the following"
         echo -e "information ready. If you lack any required data, press [Ctrl+C] to abort,"
