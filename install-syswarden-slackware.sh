@@ -34,7 +34,7 @@ CONF_FILE="/etc/syswarden.conf"
 SET_NAME="syswarden_blacklist"
 TMP_DIR=$(mktemp -d)
 # shellcheck disable=SC2034
-VERSION="v2.17"
+VERSION="v2.20"
 ACTIVE_PORTS=""
 SYSWARDEN_DIR="/etc/syswarden"
 WHITELIST_FILE="$SYSWARDEN_DIR/whitelist.txt"
@@ -2795,13 +2795,36 @@ SYS_RAM_USED=${SYS_RAM_USED:-0}
 SYS_RAM_TOTAL=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}')
 SYS_RAM_TOTAL=${SYS_RAM_TOTAL:-0}
 
+# --- System Storage Gathering (Root) ---
+SYS_DISK_USED=$(df -m / 2>/dev/null | awk 'NR==2 {print $3}' || echo 0)
+SYS_DISK_TOTAL=$(df -m / 2>/dev/null | awk 'NR==2 {print $2}' || echo 1)
+
 L3_GLOBAL=0; L3_GEOIP=0; L3_ASN=0
 [[ -f "$SYSWARDEN_DIR/active_global_blocklist.txt" ]] && L3_GLOBAL=$(wc -l < "$SYSWARDEN_DIR/active_global_blocklist.txt")
 [[ -f "$SYSWARDEN_DIR/geoip.txt" ]] && L3_GEOIP=$(wc -l < "$SYSWARDEN_DIR/geoip.txt")
 [[ -f "$SYSWARDEN_DIR/asn.txt" ]] && L3_ASN=$(wc -l < "$SYSWARDEN_DIR/asn.txt")
 
+# --- System Services Tracking (Universal Pgrep) ---
+SRV_F2B=$(pgrep -f fail2ban-server >/dev/null && echo "active" || echo "offline")
+SRV_CRON=$(pgrep -f "cron|crond" >/dev/null && echo "active" || echo "offline")
+SRV_NGX=$(pgrep -f "nginx|httpd" >/dev/null && echo "active" || echo "offline")
+SRV_L3=$(command -v nft >/dev/null || lsmod | grep -q ip_set && echo "active" || echo "offline")
+
+SERVICES_JSON=$(jq -n \
+  --arg f2b "$SRV_F2B" --arg crn "$SRV_CRON" --arg ngx "$SRV_NGX" --arg fw "$SRV_L3" \
+  '[
+    {"name":"fail2ban-server","status":$f2b},
+    {"name":"netfilter/nftables","status":$fw},
+    {"name":"nginx (worker)","status":$ngx},
+    {"name":"cron/crond","status":$crn},
+    {"name":"syswarden-telemetry","status":"active"}
+  ]')
+
 L7_TOTAL_BANNED=0; L7_ACTIVE_JAILS=0
 JAILS_JSON="[]"; BANNED_IPS_JSON="[]"
+
+# --- Risk Radar Vectors ---
+R_EXP=0; R_BF=0; R_REC=0; R_DOS=0; R_ABU=0
 
 if command -v fail2ban-client >/dev/null && timeout 2 fail2ban-client ping >/dev/null 2>&1; then
     JAIL_LIST=$(timeout 2 fail2ban-client status 2>/dev/null | awk -F'Jail list:[ \t]*' '/Jail list:/ {print $2}' | tr -d ' ' | tr ',' '\n' || true)
@@ -2815,10 +2838,63 @@ if command -v fail2ban-client >/dev/null && timeout 2 fail2ban-client ping >/dev
             L7_TOTAL_BANNED=$((L7_TOTAL_BANNED + BANNED_COUNT))
             if [[ "$BANNED_COUNT" -gt 0 ]]; then
                 JAILS_JSON=$(echo "$JAILS_JSON" | jq --arg n "$JAIL" --argjson c "$BANNED_COUNT" '. + [{"name": $n, "count": $c}]')
+                
+                # --- RISK RADAR CALCULATION ---
+                if [[ "$JAIL" =~ (sqli|xss|lfi|revshell|webshell|ssti|ssrf|jndi) ]]; then R_EXP=$((R_EXP + BANNED_COUNT))
+                elif [[ "$JAIL" =~ (ssh|auth|privesc|prestashop) ]]; then R_BF=$((R_BF + BANNED_COUNT))
+                elif [[ "$JAIL" =~ (scan|bot|mapper|enum|hunter) ]]; then R_REC=$((R_REC + BANNED_COUNT))
+                elif [[ "$JAIL" =~ (flood) ]]; then R_DOS=$((R_DOS + BANNED_COUNT))
+                else R_ABU=$((R_ABU + BANNED_COUNT)); fi
+                
                 BANNED_IPS=$(echo "$STATUS_OUT" | awk -F'Banned IP list:[ \t]*' '/Banned IP list:/ {print $2}' | tr -d ',' | tr ' ' '\n' | tail -n 50 || true)
                 for IP in $BANNED_IPS; do
                     if [[ -n "$IP" ]]; then
-                        BANNED_IPS_JSON=$(echo "$BANNED_IPS_JSON" | jq --arg ip "$IP" --arg j "$JAIL" '. + [{"ip": $ip, "jail": $j}]')
+                        # 1. Get the exact Ban Timestamp from Fail2ban
+                        TS=$(timeout 1 grep -F "[$JAIL] Ban $IP" /var/log/fail2ban.log | tail -n 1 | awk '{print $1" "$2}' | cut -d',' -f1 || true)
+                        TS=${TS:-"Time Unknown"}
+                        
+                        # 2. Dynamic Source Log Scraper (Multi-file & Error Handling)
+                        L7_PAYLOAD=""
+                        RAW_LOG=""
+                        
+                        if [[ "$JAIL" =~ (recidive) ]]; then
+                            L7_PAYLOAD="Repeat Offender (Recidive Module)"
+                        elif [[ "$JAIL" =~ (portscan) ]]; then
+                            RAW_LOG=$(timeout 1 grep -h -F "$IP" /var/log/kern-firewall.log /var/log/kern.log /var/log/messages /var/log/syslog 2>/dev/null | tail -n 1 || true)
+                            DPT=$(echo "$RAW_LOG" | grep -oE 'DPT=[0-9]+' || true)
+                            PROTO=$(echo "$RAW_LOG" | grep -oE 'PROTO=[A-Z]+' || true)
+                            if [[ -n "$DPT" ]]; then
+                                L7_PAYLOAD="Port Scan Probe -> $PROTO $DPT"
+                            else
+                                L7_PAYLOAD=$(echo "$RAW_LOG" | grep -oE '\[SysWarden-BLOCK\].*')
+                            fi
+                        elif [[ "$JAIL" =~ (sqli|xss|lfi|revshell|webshell|ssti|ssrf|jndi|scan|bot|mapper|enum|hunter|flood|proxy|prestashop|atlassian|wordpress|drupal|nginx|apache) ]]; then
+                            RAW_LOG=$(timeout 1 grep -h -F "$IP" /var/log/nginx/access.log /var/log/nginx/error.log /var/log/apache2/access.log /var/log/apache2/error.log /var/log/httpd/access_log /var/log/httpd/error_log 2>/dev/null | tail -n 1 || true)
+                            if [[ "$RAW_LOG" == *"\""* ]]; then
+                                L7_PAYLOAD=$(echo "$RAW_LOG" | awk -F'"' '{print $2}')
+                            else
+                                L7_PAYLOAD=$(echo "$RAW_LOG" | sed -E 's/^.*\[error\][0-9 #:]*//')
+                            fi
+                        else
+                            RAW_LOG=$(timeout 1 grep -h -F "$IP" /var/log/auth-syswarden.log /var/log/secure /var/log/auth.log /var/log/maillog /var/log/mail.log /var/log/messages /var/log/syslog /var/log/fail2ban.log /var/log/daemon.log /var/log/audit/audit.log 2>/dev/null | tail -n 1 || true)
+                            L7_PAYLOAD=$(echo "$RAW_LOG" | sed -E 's/^.*[a-zA-Z]+\[[0-9]+\]:[ \t]*//')
+                        fi
+                        
+                        # DEVSECOPS FIX: Secure Whitespace Trimming
+                        L7_PAYLOAD=$(echo "$L7_PAYLOAD" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' || true)
+                        
+                        # Ultimate Fallback Matrix
+                        [[ -z "$L7_PAYLOAD" && -n "$RAW_LOG" ]] && L7_PAYLOAD="$RAW_LOG"
+                        [[ -z "$L7_PAYLOAD" ]] && L7_PAYLOAD="Log rotated or payload obscured"
+                        
+                        # Truncate payload to 75 characters to avoid breaking the UI layout
+                        CLEAN_PAYLOAD="${L7_PAYLOAD:0:75}"
+                        [[ ${#L7_PAYLOAD} -gt 75 ]] && CLEAN_PAYLOAD="${CLEAN_PAYLOAD}..."
+                        
+                        # Final formatting: PAYLOAD — [TIMESTAMP]
+                        FINAL_DISPLAY="$CLEAN_PAYLOAD — [$TS]"
+                        
+                        BANNED_IPS_JSON=$(echo "$BANNED_IPS_JSON" | jq --arg ip "$IP" --arg j "$JAIL" --arg p "$FINAL_DISPLAY" '. + [{"ip": $ip, "jail": $j, "payload": $p}]')
                     fi
                 done
             fi
@@ -2843,6 +2919,8 @@ if [[ -f "$SYSWARDEN_DIR/whitelist.txt" ]]; then
     for IP in $WL_IPS; do [[ -n "$IP" ]] && WL_JSON=$(echo "$WL_JSON" | jq --arg ip "$IP" '. + [$ip]'); done
 fi
 
+RADAR_JSON=$(jq -n --argjson e "$R_EXP" --argjson b "$R_BF" --argjson r "$R_REC" --argjson d "$R_DOS" --argjson a "$R_ABU" '[$e, $b, $r, $d, $a]')
+
 jq -n \
   --arg ts "$SYS_TIMESTAMP" \
   --arg host "$SYS_HOSTNAME" \
@@ -2850,6 +2928,8 @@ jq -n \
   --arg load "$SYS_LOAD" \
   --argjson ru "$SYS_RAM_USED" \
   --argjson rt "$SYS_RAM_TOTAL" \
+  --argjson du "$SYS_DISK_USED" \
+  --argjson dt "$SYS_DISK_TOTAL" \
   --argjson lg "$L3_GLOBAL" \
   --argjson lgeo "$L3_GEOIP" \
   --argjson lasn "$L3_ASN" \
@@ -2860,11 +2940,13 @@ jq -n \
   --argjson top "$TOP_ATTACKERS_JSON" \
   --argjson wlc "$WHITELIST_COUNT" \
   --argjson wlip "$WL_JSON" \
+  --argjson srv "$SERVICES_JSON" \
+  --argjson rad "$RADAR_JSON" \
 '{
   timestamp: $ts,
-  system: { hostname: $host, uptime: $up, load_average: $load, ram_used_mb: $ru, ram_total_mb: $rt },
+  system: { hostname: $host, uptime: $up, load_average: $load, ram_used_mb: $ru, ram_total_mb: $rt, disk_used_mb: $du, disk_total_mb: $dt, services: $srv },
   layer3: { global_blocked: $lg, geoip_blocked: $lgeo, asn_blocked: $lasn },
-  layer7: { total_banned: $ltb, active_jails: $laj, jails_data: $jj, banned_ips: $bip, top_attackers: $top },
+  layer7: { total_banned: $ltb, active_jails: $laj, jails_data: $jj, banned_ips: $bip, top_attackers: $top, risk_radar: $rad },
   whitelist: { active_ips: $wlc, ips: $wlip }
 }' > "$TMP_FILE"
 
@@ -2886,7 +2968,7 @@ EOF
 }
 
 # ==============================================================================
-# SYSWARDEN v2.17 - NGINX SECURE DASHBOARD (ENTERPRISE SAAS UI / SPA / CSP)
+# SYSWARDEN v2.20 - NGINX SECURE DASHBOARD (ENTERPRISE SAAS UI / SPA / CSP)
 # ==============================================================================
 function generate_dashboard() {
     log "INFO" "Generating the Enterprise SaaS Nginx Dashboard (SPA/Sidebar/CSP)..."
@@ -2944,17 +3026,17 @@ function generate_dashboard() {
             --sw-sidebar-active-text: #1d4ed8;
         }
         :root[data-bs-theme="dark"] {
-            --sw-bg: #09090b;
-            --sw-sidebar-bg: #121214;
-            --sw-card-bg: #18181b;
-            --sw-border: #27272a;
-            --sw-text: #f4f4f5;
-            --sw-text-muted: #a1a1aa;
+            --sw-bg: #000000;
+            --sw-sidebar-bg: #000000;
+            --sw-card-bg: #09090b;
+            --sw-border: rgba(255, 255, 255, 0.12);
+            --sw-text: #ffffff;
+            --sw-text-muted: #d4d4d8;
             --sw-brand-text: #ffffff;
-            --sw-brand-icon: #eab308;
-            --sw-sidebar-hover: #27272a;
-            --sw-sidebar-active: #27272a;
-            --sw-sidebar-active-text: #fafafa;
+            --sw-brand-icon: #3b82f6;
+            --sw-sidebar-hover: #18181b;
+            --sw-sidebar-active: #18181b;
+            --sw-sidebar-active-text: #ffffff;
         }
 
         /* --- APP LAYOUT (APP-LIKE FEEL) --- */
@@ -3001,9 +3083,12 @@ function generate_dashboard() {
         ::-webkit-scrollbar-track { background: transparent; }
         ::-webkit-scrollbar-thumb { background: var(--sw-border); border-radius: 10px; }
         
-        /* Overrides */
-        .table { --bs-table-bg: transparent !important; }
-        .table > :not(caption) > * > * { background-color: transparent !important; }
+        /* Overrides - Enterprise Border Policy (Separators) */
+        .table { --bs-table-bg: transparent !important; margin-bottom: 0 !important; }
+        .table > :not(caption) > * > * { background-color: transparent !important; border-color: var(--sw-border) !important; }
+        .table > tbody > tr > td { border-bottom: 1px solid var(--sw-border) !important; padding-top: 10px; padding-bottom: 10px; }
+        .table > tbody > tr:last-child > td { border-bottom: none !important; }
+        .table > thead > tr > th { border-bottom: 1px solid var(--sw-border) !important; }
         .ip-font { font-size: 85% !important; }
 
         /* Mobile Sidebar Overrides */
@@ -3023,7 +3108,7 @@ function generate_dashboard() {
         <div class="d-flex align-items-center gap-2 px-2 mb-5">
             <svg style="color: var(--sw-brand-icon);" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
             <span class="fs-5 fw-bold" style="color: var(--sw-brand-text); letter-spacing: -0.5px;">SYSWARDEN</span>
-            <span class="badge bg-primary bg-opacity-10 text-primary border border-primary border-opacity-25 rounded-pill font-mono small ms-auto">v2.17</span>
+            <span class="badge bg-primary bg-opacity-10 text-primary border border-primary border-opacity-25 rounded-pill font-mono small ms-auto">v2.20</span>
         </div>
 
         <nav class="flex-grow-1">
@@ -3044,9 +3129,9 @@ function generate_dashboard() {
 
         <div class="mt-auto border-top pt-4" style="border-color: var(--sw-border) !important;">
             <div class="d-flex flex-column gap-2 px-2">
-                <div class="font-mono small text-muted d-flex align-items-center gap-2">
-                    <div class="spinner-grow spinner-grow-sm text-success" style="width: 8px; height: 8px;" role="status"></div>
+                <div class="font-mono small text-muted d-flex align-items-center justify-content-between">
                     <span id="sys-hostname" class="text-truncate">Node...</span>
+                    <div class="spinner-grow spinner-grow-sm text-success" style="width: 8px; height: 8px;" role="status"></div>
                 </div>
                 <div class="font-mono text-muted d-flex align-items-center gap-2 mb-3" style="font-size: 0.75rem;" id="last-update">Syncing...</div>
                 
@@ -3059,7 +3144,7 @@ function generate_dashboard() {
         </div>
     </aside>
 
-    <main class="main-wrapper bg-body-tertiary">
+    <main class="main-wrapper">
         
         <div class="d-lg-none d-flex align-items-center justify-content-between p-3 bg-body border-bottom sticky-top">
             <div class="d-flex align-items-center gap-2">
@@ -3118,13 +3203,29 @@ function generate_dashboard() {
                     </div>
                 </div>
 
-                <div class="card mb-4">
-                    <div class="card-header bg-transparent pt-4 pb-0 px-4 d-flex align-items-center gap-2">
-                        <span class="text-danger">📈</span> L7 Threat Telemetry (Live Timeline)
+                <div class="row g-4 mb-4">
+                    <div class="col-xl-8">
+                        <div class="card h-100">
+                            <div class="card-header bg-transparent pt-4 pb-0 px-4 d-flex align-items-center gap-2">
+                                <span class="text-danger">📈</span> L7 Threat Telemetry (Live Timeline)
+                            </div>
+                            <div class="card-body p-4">
+                                <div class="chart-wrapper">
+                                    <canvas id="threatChart"></canvas>
+                                </div>
+                            </div>
+                        </div>
                     </div>
-                    <div class="card-body p-4">
-                        <div class="chart-wrapper">
-                            <canvas id="threatChart"></canvas>
+                    <div class="col-xl-4">
+                        <div class="card h-100">
+                            <div class="card-header bg-transparent pt-4 pb-0 px-4 d-flex align-items-center gap-2">
+                                <span class="text-warning">🕸️</span> Global Risk Vectors
+                            </div>
+                            <div class="card-body p-4 d-flex align-items-center justify-content-center">
+                                <div style="position: relative; height: 280px; width: 100%;">
+                                    <canvas id="riskChart"></canvas>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -3139,8 +3240,8 @@ function generate_dashboard() {
                             <div class="card-header bg-transparent pt-4 pb-3 px-4">🎯 Top Attackers (OSINT History)</div>
                             <div class="card-body p-0">
                                 <div class="table-responsive table-container px-3 pb-3">
-                                    <table class="table table-sm table-borderless table-hover align-middle mb-0">
-                                        <thead class="border-bottom" style="position: sticky; top: 0; background: var(--sw-card-bg); z-index: 2;">
+                                    <table class="table table-sm table-hover align-middle mb-0">
+                                        <thead style="position: sticky; top: 0; background: var(--sw-card-bg); z-index: 2; border: none; box-shadow: none;">
                                             <tr>
                                                 <th class="text-muted small fw-normal pb-2">IP ADDRESS</th>
                                                 <th class="text-end text-muted small fw-normal pb-2">HITS</th>
@@ -3167,11 +3268,12 @@ function generate_dashboard() {
                             <div class="card-header bg-transparent pt-4 pb-3 px-4">🔴 L7 Banned IP Registry (Live Jail Allocations)</div>
                             <div class="card-body p-0">
                                 <div class="table-responsive table-container px-3 pb-3" style="max-height: 450px;">
-                                    <table class="table table-sm table-borderless table-hover align-middle mb-0">
-                                        <thead class="border-bottom" style="position: sticky; top: 0; background: var(--sw-card-bg); z-index: 2;">
+                                    <table class="table table-sm table-hover align-middle mb-0">
+                                        <thead style="position: sticky; top: 0; background: var(--sw-card-bg); z-index: 2; border: none; box-shadow: none;">
                                             <tr>
                                                 <th class="text-muted small fw-normal pb-2">IP ADDRESS</th>
-                                                <th class="text-end text-muted small fw-normal pb-2">TARGET JAIL</th>
+                                                <th class="text-muted small fw-normal pb-2">TARGET JAIL</th>
+                                                <th class="text-end text-muted small fw-normal pb-2">TRIGGER</th>
                                             </tr>
                                         </thead>
                                         <tbody id="banned-ips-list"></tbody>
@@ -3194,7 +3296,7 @@ function generate_dashboard() {
                                     <div class="stat-label">Node Status</div>
                                     <span class="badge bg-secondary rounded-pill font-mono" id="sys-uptime">--</span>
                                 </div>
-                                <div class="mb-4">
+                                <div class="mb-4 border-bottom pb-4" style="border-color: var(--sw-border) !important;">
                                     <div class="text-muted small text-uppercase fw-bold mb-2">CPU Load Average (1, 5, 15m)</div>
                                     <div class="stat-value font-mono" id="sys-load">--</div>
                                 </div>
@@ -3207,6 +3309,27 @@ function generate_dashboard() {
                                         <div class="progress-bar bg-primary" role="progressbar" id="ram-progress" style="width: 0%;"></div>
                                     </div>
                                 </div>
+                                <div class="mt-4">
+                                    <div class="d-flex justify-content-between small text-muted mb-2 font-mono fw-bold">
+                                        <span>Storage Utilization (Root)</span>
+                                        <span id="sys-disk">-- GB</span>
+                                    </div>
+                                    <div class="progress" style="height: 8px; background-color: var(--sw-border);" id="disk-progress-container">
+                                        <div class="progress-bar bg-info" role="progressbar" id="disk-progress" style="width: 0%;"></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="col-xl-6">
+                        <div class="card h-100">
+                            <div class="card-header bg-transparent pt-4 pb-3 px-4 text-uppercase fw-bold small text-muted">
+                                ⚙️ Core Processes
+                            </div>
+                            <div class="card-body px-4 pt-0">
+                                <ul class="list-group list-group-flush font-mono small border-0" id="sys-services-list">
+                                    </ul>
                             </div>
                         </div>
                     </div>
@@ -3225,6 +3348,7 @@ EOF
     # 2. Generating the JS Logic (SPA Routing & Performance Engine)
     cat <<'EOF' >"$UI_DIR/app.js"
 let threatChart = null;
+let riskChart = null;
 const MAX_DATA_POINTS = 40;
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -3326,8 +3450,9 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     try {
-        const ctx = document.getElementById('threatChart').getContext('2d');
-        threatChart = new Chart(ctx, {
+        // 1. Initialize Timeline Chart (L7 Threat Telemetry)
+        const ctxThreat = document.getElementById('threatChart').getContext('2d');
+        threatChart = new Chart(ctxThreat, {
             type: 'line', data: chartData,
             options: {
                 responsive: true, maintainAspectRatio: false,
@@ -3346,7 +3471,40 @@ document.addEventListener('DOMContentLoaded', () => {
                 animation: { duration: 0 }
             }
         });
+
+        // 2. Initialize Risk Radar Chart (Global Risk Vectors)
+        const ctxRadar = document.getElementById('riskChart').getContext('2d');
+        riskChart = new Chart(ctxRadar, {
+            type: 'radar',
+            data: {
+                labels: ['Exploits', 'Brute-Force', 'Recon', 'DDoS', 'Abuse/Spam'],
+                datasets: [{
+                    label: 'Risk Vector',
+                    data: [0, 0, 0, 0, 0],
+                    backgroundColor: 'rgba(239, 68, 68, 0.25)',
+                    borderColor: '#ef4444',
+                    pointBackgroundColor: '#ef4444',
+                    borderWidth: 2,
+                    pointRadius: 3
+                }]
+            },
+            options: {
+                responsive: true, maintainAspectRatio: false,
+                plugins: { legend: { display: false } },
+                scales: {
+                    r: {
+                        angleLines: { color: 'rgba(107, 114, 128, 0.2)' },
+                        grid: { color: 'rgba(107, 114, 128, 0.2)' },
+                        pointLabels: { font: { family: 'JetBrains Mono', size: 10, weight: 'bold' } },
+                        ticks: { display: false }
+                    }
+                }
+            }
+        });
     } catch (e) { console.warn("Chart.js init failed:", e); }
+
+    // DEVSECOPS FIX: Force theme application on charts immediately after instantiation to fix F5 dimming bug
+    updateChartTheme(document.documentElement.getAttribute('data-bs-theme'));
 
     function updateChartTheme(theme) {
         if (!threatChart) return;
@@ -3362,6 +3520,15 @@ document.addEventListener('DOMContentLoaded', () => {
         threatChart.options.plugins.tooltip.borderColor = isDark ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)';
         threatChart.options.plugins.tooltip.borderWidth = 1;
         threatChart.update();
+		
+		// --- RADAR THEME UPDATE ---
+        if(riskChart) {
+            riskChart.options.scales.r.pointLabels.color = textColor;
+            // DEVSECOPS FIX: Increased opacity to 0.25 in dark mode for crisp web visibility
+            riskChart.options.scales.r.angleLines.color = isDark ? 'rgba(255, 255, 255, 0.25)' : 'rgba(0, 0, 0, 0.1)';
+            riskChart.options.scales.r.grid.color = isDark ? 'rgba(255, 255, 255, 0.25)' : 'rgba(0, 0, 0, 0.1)';
+            riskChart.update();
+        }
     }
 
     // --- DATA INGESTION ENGINE ---
@@ -3382,6 +3549,15 @@ document.addEventListener('DOMContentLoaded', () => {
             const ramBar = document.getElementById('ram-progress');
             ramBar.style.width = `${ramPercent}%`;
             ramBar.className = `progress-bar ${ramPercent > 85 ? 'bg-danger' : ramPercent > 60 ? 'bg-warning' : 'bg-primary'}`;
+			
+			// Storage calculation (MB to GB conversion)
+            const diskUsed = (parseInt(data.system.disk_used_mb) / 1024).toFixed(1);
+            const diskTotal = (parseInt(data.system.disk_total_mb) / 1024).toFixed(1);
+            const diskPercent = Math.round((diskUsed / diskTotal) * 100) || 0;
+            document.getElementById('sys-disk').innerText = `${diskUsed} / ${diskTotal} GB`;
+            const diskBar = document.getElementById('disk-progress');
+            diskBar.style.width = `${diskPercent}%`;
+            diskBar.className = `progress-bar ${diskPercent > 85 ? 'bg-danger' : diskPercent > 70 ? 'bg-warning' : 'bg-info'}`;
 
             const sysLoadEl = document.getElementById('sys-load');
             sysLoadEl.innerText = data.system.load_average;
@@ -3396,6 +3572,24 @@ document.addEventListener('DOMContentLoaded', () => {
             document.getElementById('l7-banned').innerText = parseInt(data.layer7.total_banned).toLocaleString();
             document.getElementById('l7-jails').innerText = data.layer7.active_jails;
             document.getElementById('wl-count').innerText = data.whitelist.active_ips;
+			
+			// Inject Services
+            const srvEl = document.getElementById('sys-services-list');
+            if(data.system.services && srvEl) {
+                srvEl.innerHTML = data.system.services.map(srv => `
+                    <li class="list-group-item d-flex justify-content-between align-items-center bg-transparent px-0 border-0 py-3 border-bottom" style="border-color: var(--sw-border) !important;">
+                        <span class="text-body fw-bold">${srv.name}</span>
+                        ${srv.status === 'active' 
+                            ? '<span class="badge bg-success bg-opacity-10 text-success rounded-pill border border-success border-opacity-25 px-3">ACTIVE</span>' 
+                            : '<span class="badge bg-danger bg-opacity-10 text-danger rounded-pill border border-danger border-opacity-25 px-3">OFFLINE</span>'}
+                    </li>`).join('');
+            }
+
+            // Inject Radar Data
+            if(riskChart && data.layer7.risk_radar) {
+                riskChart.data.datasets[0].data = data.layer7.risk_radar;
+                riskChart.update();
+            }
 
             // Renderers
             document.getElementById('whitelist-ips-list').innerHTML = data.whitelist.ips.map(ip => `<li class="mb-1 opacity-75">${ip}</li>`).join('');
@@ -3412,7 +3606,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const jailsEl = document.getElementById('top-jails-list');
             if(data.layer7.jails_data.length > 0) {
                 jailsEl.innerHTML = [...data.layer7.jails_data].sort((a, b) => b.count - a.count).map(jail => `
-                    <li class="list-group-item d-flex justify-content-between align-items-center bg-transparent px-0 border-bottom border-secondary border-opacity-10 py-3">
+                    <li class="list-group-item d-flex justify-content-between align-items-center bg-transparent px-0 py-3 border-bottom" style="border-color: var(--sw-border) !important;">
                         <span class="text-body-secondary fw-medium">${jail.name}</span>
                         <span class="badge bg-secondary bg-opacity-25 text-body rounded-pill">${jail.count}</span>
                     </li>`).join('');
@@ -3424,10 +3618,11 @@ document.addEventListener('DOMContentLoaded', () => {
                     const isRecidive = entry.jail.includes('recidive');
                     return `<tr>
                         <td class="font-mono"><a href="https://www.abuseipdb.com/check/${entry.ip}" target="_blank" rel="noopener noreferrer" class="text-decoration-none text-danger fw-bold opacity-75 ip-font">${entry.ip}</a></td>
-                        <td class="text-end font-mono"><span class="badge ${isRecidive ? 'bg-danger text-white' : 'bg-secondary bg-opacity-25 text-body'} fw-normal">${entry.jail}</span></td>
+                        <td class="font-mono"><span class="badge ${isRecidive ? 'bg-danger text-white' : 'bg-secondary bg-opacity-25 text-body'} fw-normal">${entry.jail}</span></td>
+                        <td class="text-end font-mono text-muted small" style="font-size: 0.75rem;">${entry.payload || 'N/A'}</td>
                     </tr>`;
                 }).join('');
-            } else { bannedEl.innerHTML = `<tr><td colspan="2" class="text-center text-muted small py-5">Registry is empty. Architecture is secure.</td></tr>`; }
+            } else { bannedEl.innerHTML = `<tr><td colspan="3" class="text-center text-muted small py-5">Registry is empty. Architecture is secure.</td></tr>`; }
 
             // Chart Updater
             const now = new Date();
@@ -3739,7 +3934,7 @@ if [[ "$MODE" != "update" ]] && [[ "$MODE" != "uninstall" ]]; then
     echo -e "${RED}███████║   ██║   ███████║╚███╔███╔╝██║  ██║██║  ██║██████╔╝███████╗██║ ╚████║${NC}"
     echo -e "${RED}╚══════╝   ╚═╝   ╚══════╝ ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝ ╚══════╝╚═╝  ╚═══╝${NC}"
     echo -e "${BLUE}===================================================================================${NC}"
-    echo -e "${GREEN}               Advanced Firewall & Blocklist Orchestrator | v2.17                  ${NC}"
+    echo -e "${GREEN}               Advanced Firewall & Blocklist Orchestrator | v2.20                  ${NC}"
     echo -e "${BLUE}===================================================================================${NC}\n"
 fi
 
@@ -3758,7 +3953,7 @@ if [[ "$MODE" != "update" ]]; then
         CYAN='\033[0;36m'
         clear
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
-        echo -e "${GREEN}${BOLD}                   SYSWARDEN v2.17 - PRE-FLIGHT CHECKLIST                     ${NC}"
+        echo -e "${GREEN}${BOLD}                   SYSWARDEN v2.20 - PRE-FLIGHT CHECKLIST                     ${NC}"
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
         echo -e "Before proceeding with the deployment, please ensure you have the following"
         echo -e "information ready. If you lack any required data, press [Ctrl+C] to abort,"
