@@ -34,7 +34,7 @@ CONF_FILE="/etc/syswarden.conf"
 SET_NAME="syswarden_blacklist"
 TMP_DIR=$(mktemp -d)
 # shellcheck disable=SC2034
-VERSION="v2.28"
+VERSION="v2.29"
 ACTIVE_PORTS=""
 SYSWARDEN_DIR="/etc/syswarden"
 WHITELIST_FILE="$SYSWARDEN_DIR/whitelist.txt"
@@ -888,10 +888,17 @@ EOF
             done <"$WHITELIST_FILE"
         fi
         cat <<EOF >>"$TMP_DIR/syswarden.nft"
-        ip saddr @$SET_NAME log prefix "[SysWarden-BLOCK] " drop
+        ip saddr @$SET_NAME limit rate 2/second log prefix "[SysWarden-BLOCK] "
+        ip saddr @$SET_NAME drop
 EOF
-        if [[ "${GEOBLOCK_COUNTRIES:-none}" != "none" ]] && [[ -s "$GEOIP_FILE" ]]; then echo "        ip saddr @$GEOIP_SET_NAME log prefix \"[SysWarden-GEO] \" drop" >>"$TMP_DIR/syswarden.nft"; fi
-        if [[ "${BLOCK_ASNS:-none}" != "none" ]] && [[ -s "$ASN_FILE" ]]; then echo "        ip saddr @$ASN_SET_NAME log prefix \"[SysWarden-ASN] \" drop" >>"$TMP_DIR/syswarden.nft"; fi
+        if [[ "${GEOBLOCK_COUNTRIES:-none}" != "none" ]] && [[ -s "$GEOIP_FILE" ]]; then
+            echo "        ip saddr @$GEOIP_SET_NAME limit rate 2/second log prefix \"[SysWarden-GEO] \"" >>"$TMP_DIR/syswarden.nft"
+            echo "        ip saddr @$GEOIP_SET_NAME drop" >>"$TMP_DIR/syswarden.nft"
+        fi
+        if [[ "${BLOCK_ASNS:-none}" != "none" ]] && [[ -s "$ASN_FILE" ]]; then
+            echo "        ip saddr @$ASN_SET_NAME limit rate 2/second log prefix \"[SysWarden-ASN] \"" >>"$TMP_DIR/syswarden.nft"
+            echo "        ip saddr @$ASN_SET_NAME drop" >>"$TMP_DIR/syswarden.nft"
+        fi
 
         cat <<EOF >>"$TMP_DIR/syswarden.nft"
     }
@@ -935,7 +942,8 @@ EOF
         fi
 
         cat <<EOF >>"$TMP_DIR/syswarden.nft"
-        log prefix "[SysWarden-BLOCK] [Catch-All] " drop
+        limit rate 2/second log prefix "[SysWarden-BLOCK] [Catch-All] "
+        drop
     }
 }
 EOF
@@ -1036,16 +1044,16 @@ EOF
         fi
 
         if [[ "${GEOBLOCK_COUNTRIES:-none}" != "none" ]] && [[ -s "$GEOIP_FILE" ]]; then
-            iptables -t raw -A PREROUTING -m set --match-set "$GEOIP_SET_NAME" src -j LOG --log-prefix "[SysWarden-GEO] "
+            iptables -t raw -A PREROUTING -m set --match-set "$GEOIP_SET_NAME" src -m limit --limit 2/sec -j LOG --log-prefix "[SysWarden-GEO] "
             iptables -t raw -A PREROUTING -m set --match-set "$GEOIP_SET_NAME" src -j DROP
         fi
 
         if [[ "${BLOCK_ASNS:-none}" != "none" ]] && [[ -s "$ASN_FILE" ]]; then
-            iptables -t raw -A PREROUTING -m set --match-set "$ASN_SET_NAME" src -j LOG --log-prefix "[SysWarden-ASN] "
+            iptables -t raw -A PREROUTING -m set --match-set "$ASN_SET_NAME" src -m limit --limit 2/sec -j LOG --log-prefix "[SysWarden-ASN] "
             iptables -t raw -A PREROUTING -m set --match-set "$ASN_SET_NAME" src -j DROP
         fi
 
-        iptables -t raw -A PREROUTING -m set --match-set "$SET_NAME" src -j LOG --log-prefix "[SysWarden-BLOCK] "
+        iptables -t raw -A PREROUTING -m set --match-set "$SET_NAME" src -m limit --limit 2/sec -j LOG --log-prefix "[SysWarden-BLOCK] "
         iptables -t raw -A PREROUTING -m set --match-set "$SET_NAME" src -j DROP
 
         iptables -A INPUT -p tcp --dport "${SSH_PORT:-22}" -j ACCEPT
@@ -1054,7 +1062,7 @@ EOF
         fi
 
         iptables -A INPUT -p tcp --dport 9999 -j ACCEPT
-        iptables -A INPUT -j LOG --log-prefix "[SysWarden-BLOCK] [Catch-All] "
+        iptables -A INPUT -m limit --limit 2/sec -j LOG --log-prefix "[SysWarden-BLOCK] [Catch-All] "
         iptables -A INPUT -j DROP
 
         iptables-save >/etc/syswarden/iptables.save
@@ -2990,7 +2998,7 @@ EOF
 }
 
 # ==============================================================================
-# SYSWARDEN v2.28 - NGINX SECURE DASHBOARD (ENTERPRISE SAAS UI / SPA / CSP)
+# SYSWARDEN v2.29 - NGINX SECURE DASHBOARD (ENTERPRISE SAAS UI / SPA / CSP)
 # ==============================================================================
 function generate_dashboard() {
     log "INFO" "Generating the Enterprise SaaS Nginx Dashboard (SPA/Sidebar/CSP)..."
@@ -3143,7 +3151,7 @@ function generate_dashboard() {
             <svg style="color: var(--sw-brand-icon);" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
             <div class="d-flex align-items-baseline gap-2 hide-collapsed">
                 <span class="fs-5 fw-bold" style="color: var(--sw-brand-text); letter-spacing: -0.5px;">SYSWARDEN</span>
-                <span class="stat-label" style="margin-bottom: 0;">v2.28</span>
+                <span class="stat-label" style="margin-bottom: 0;">v2.29</span>
             </div>
         </div>
 
@@ -4111,7 +4119,7 @@ if [[ "$MODE" != "update" ]] && [[ "$MODE" != "uninstall" ]]; then
     echo -e "${RED}███████║   ██║   ███████║╚███╔███╔╝██║  ██║██║  ██║██████╔╝███████╗██║ ╚████║${NC}"
     echo -e "${RED}╚══════╝   ╚═╝   ╚══════╝ ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝ ╚══════╝╚═╝  ╚═══╝${NC}"
     echo -e "${BLUE}===================================================================================${NC}"
-    echo -e "${GREEN}               Advanced Firewall & Blocklist Orchestrator | v2.28                  ${NC}"
+    echo -e "${GREEN}               Advanced Firewall & Blocklist Orchestrator | v2.29                  ${NC}"
     echo -e "${BLUE}===================================================================================${NC}\n"
 fi
 
@@ -4130,7 +4138,7 @@ if [[ "$MODE" != "update" ]]; then
         CYAN='\033[0;36m'
         clear
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
-        echo -e "${GREEN}${BOLD}                   SYSWARDEN v2.28 - PRE-FLIGHT CHECKLIST                     ${NC}"
+        echo -e "${GREEN}${BOLD}                   SYSWARDEN v2.29 - PRE-FLIGHT CHECKLIST                     ${NC}"
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
         echo -e "Before proceeding with the deployment, please ensure you have the following"
         echo -e "information ready. If you lack any required data, press [Ctrl+C] to abort,"

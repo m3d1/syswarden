@@ -42,7 +42,7 @@ LOG_FILE="/var/log/syswarden-install.log"
 CONF_FILE="/etc/syswarden.conf"
 SET_NAME="syswarden_blacklist"
 TMP_DIR=$(mktemp -d)
-VERSION="v2.28"
+VERSION="v2.29"
 ACTIVE_PORTS=""
 SYSWARDEN_DIR="/etc/syswarden"
 WHITELIST_FILE="$SYSWARDEN_DIR/whitelist.txt"
@@ -1057,15 +1057,18 @@ EOF
         fi
 
         cat <<EOF >>"$TMP_DIR/syswarden.nft"
-add rule netdev syswarden_hw_drop ingress_frontline ip saddr @$SET_NAME log prefix "[SysWarden-BLOCK] " drop
+add rule netdev syswarden_hw_drop ingress_frontline ip saddr @$SET_NAME limit rate 2/second log prefix "[SysWarden-BLOCK] "
+add rule netdev syswarden_hw_drop ingress_frontline ip saddr @$SET_NAME drop
 EOF
 
         if [[ "${GEOBLOCK_COUNTRIES:-none}" != "none" ]] && [[ -s "$GEOIP_FILE" ]]; then
-            echo "add rule netdev syswarden_hw_drop ingress_frontline ip saddr @$GEOIP_SET_NAME log prefix \"[SysWarden-GEO] \" drop" >>"$TMP_DIR/syswarden.nft"
+            echo "add rule netdev syswarden_hw_drop ingress_frontline ip saddr @$GEOIP_SET_NAME limit rate 2/second log prefix \"[SysWarden-GEO] \"" >>"$TMP_DIR/syswarden.nft"
+            echo "add rule netdev syswarden_hw_drop ingress_frontline ip saddr @$GEOIP_SET_NAME drop" >>"$TMP_DIR/syswarden.nft"
         fi
 
         if [[ "${BLOCK_ASNS:-none}" != "none" ]] && [[ -s "$ASN_FILE" ]]; then
-            echo "add rule netdev syswarden_hw_drop ingress_frontline ip saddr @$ASN_SET_NAME log prefix \"[SysWarden-ASN] \" drop" >>"$TMP_DIR/syswarden.nft"
+            echo "add rule netdev syswarden_hw_drop ingress_frontline ip saddr @$ASN_SET_NAME limit rate 2/second log prefix \"[SysWarden-ASN] \"" >>"$TMP_DIR/syswarden.nft"
+            echo "add rule netdev syswarden_hw_drop ingress_frontline ip saddr @$ASN_SET_NAME drop" >>"$TMP_DIR/syswarden.nft"
         fi
 
         cat <<EOF >>"$TMP_DIR/syswarden.nft"
@@ -1188,7 +1191,7 @@ EOF
         fi
 
         # HOTFIX: Log packets before they hit the Guillotine so Fail2ban can catch portscans
-        echo "        log prefix \"[SysWarden-BLOCK] [Catch-All] \"" >>"$OS_BYPASS_FILE"
+        echo "        limit rate 2/second log prefix \"[SysWarden-BLOCK] [Catch-All] \"" >>"$OS_BYPASS_FILE"
 
         echo "    }" >>"$OS_BYPASS_FILE"
 
@@ -1250,7 +1253,7 @@ EOF
 
         if ! iptables -t raw -C PREROUTING -m set --match-set "$SET_NAME" src -j DROP 2>/dev/null; then
             iptables -t raw -I PREROUTING 1 -m set --match-set "$SET_NAME" src -j DROP
-            iptables -t raw -I PREROUTING 1 -m set --match-set "$SET_NAME" src -j LOG --log-prefix "[SysWarden-BLOCK] "
+            iptables -t raw -I PREROUTING 1 -m set --match-set "$SET_NAME" src -m limit --limit 2/sec -j LOG --log-prefix "[SysWarden-BLOCK] "
         fi
 
         # --- ASN INJECTION (Priority 2) ---
@@ -1263,7 +1266,7 @@ EOF
 
             if ! iptables -t raw -C PREROUTING -m set --match-set "$ASN_SET_NAME" src -j DROP 2>/dev/null; then
                 iptables -t raw -I PREROUTING 1 -m set --match-set "$ASN_SET_NAME" src -j DROP
-                iptables -t raw -I PREROUTING 1 -m set --match-set "$ASN_SET_NAME" src -j LOG --log-prefix "[SysWarden-ASN] "
+                iptables -t raw -I PREROUTING 1 -m set --match-set "$ASN_SET_NAME" src -m limit --limit 2/sec -j LOG --log-prefix "[SysWarden-ASN] "
             fi
         fi
 
@@ -1277,7 +1280,7 @@ EOF
 
             if ! iptables -t raw -C PREROUTING -m set --match-set "$GEOIP_SET_NAME" src -j DROP 2>/dev/null; then
                 iptables -t raw -I PREROUTING 1 -m set --match-set "$GEOIP_SET_NAME" src -j DROP
-                iptables -t raw -I PREROUTING 1 -m set --match-set "$GEOIP_SET_NAME" src -j LOG --log-prefix "[SysWarden-GEO] "
+                iptables -t raw -I PREROUTING 1 -m set --match-set "$GEOIP_SET_NAME" src -m limit --limit 2/sec -j LOG --log-prefix "[SysWarden-GEO] "
             fi
         fi
 
@@ -1314,7 +1317,7 @@ EOF
         while iptables -D INPUT -j DROP 2>/dev/null; do :; done
         while iptables -D INPUT -j LOG --log-prefix "[SysWarden-BLOCK] [Catch-All] " 2>/dev/null; do :; done
 
-        iptables -A INPUT -j LOG --log-prefix "[SysWarden-BLOCK] [Catch-All] "
+        iptables -A INPUT -m limit --limit 2/sec -j LOG --log-prefix "[SysWarden-BLOCK] [Catch-All] "
         iptables -A INPUT -j DROP
 
         # ==========================================================
@@ -1374,18 +1377,18 @@ EOF
 
             # Apply Standard Blocklist (Priority 3)
             iptables -I DOCKER-USER 1 -m set --match-set "$SET_NAME" src -j DROP
-            iptables -I DOCKER-USER 1 -m set --match-set "$SET_NAME" src -j LOG --log-prefix "[SysWarden-DOCKER] "
+            iptables -I DOCKER-USER 1 -m set --match-set "$SET_NAME" src -m limit --limit 2/sec -j LOG --log-prefix "[SysWarden-DOCKER] "
 
             # Apply ASN-Blocklist (Priority 2)
             if [[ "${BLOCK_ASNS:-none}" != "none" ]] && [[ -s "$ASN_FILE" ]]; then
                 iptables -I DOCKER-USER 1 -m set --match-set "$ASN_SET_NAME" src -j DROP
-                iptables -I DOCKER-USER 1 -m set --match-set "$ASN_SET_NAME" src -j LOG --log-prefix "[SysWarden-ASN] "
+                iptables -I DOCKER-USER 1 -m set --match-set "$ASN_SET_NAME" src -m limit --limit 2/sec -j LOG --log-prefix "[SysWarden-ASN] "
             fi
 
             # Apply Geo-Blocklist (Priority 1)
             if [[ "${GEOBLOCK_COUNTRIES:-none}" != "none" ]] && [[ -s "$GEOIP_FILE" ]]; then
                 iptables -I DOCKER-USER 1 -m set --match-set "$GEOIP_SET_NAME" src -j DROP
-                iptables -I DOCKER-USER 1 -m set --match-set "$GEOIP_SET_NAME" src -j LOG --log-prefix "[SysWarden-GEO] "
+                iptables -I DOCKER-USER 1 -m set --match-set "$GEOIP_SET_NAME" src -m limit --limit 2/sec -j LOG --log-prefix "[SysWarden-GEO] "
             fi
 
             # --- HOTFIX: STATEFUL DOCKER BYPASS (Priority 0 - Absolute Top) ---
@@ -3242,7 +3245,7 @@ def monitor_logs():
         proc_f2b.stdout.fileno(): 'f2b'
     }
 
-    # v2.28 Logic: STRICT filter on [SysWarden-BLOCK] only.
+    # v2.29 Logic: STRICT filter on [SysWarden-BLOCK] only.
     regex_fw = re.compile(r"\[SysWarden-BLOCK\].*?SRC=([\d\.]+).*?DPT=(\d+)")
     regex_f2b = re.compile(r"\[([a-zA-Z0-9_-]+)\]\s+Ban\s+([\d\.]+)")
 
@@ -3904,7 +3907,7 @@ uninstall_syswarden() {
     rm -rf /var/lib/syswarden/* 2>/dev/null || true
     # -------------------------------------------------------------------------
 
-    # --- Clean up all SysWarden Fail2ban filters (Including v2.28 additions) ---
+    # --- Clean up all SysWarden Fail2ban filters (Including v2.29 additions) ---
     for filter in nginx-scanner mariadb-auth mongodb-guard syswarden-privesc syswarden-portscan \
         syswarden-revshell syswarden-aibots syswarden-badbots syswarden-httpflood syswarden-webshell \
         syswarden-sqli-xss syswarden-secretshunter syswarden-ssrf syswarden-jndi-ssti syswarden-apimapper \
@@ -4105,7 +4108,7 @@ setup_wazuh_agent() {
 }
 
 # ==============================================================================
-# SYSWARDEN v2.28 - TELEMETRY BACKEND
+# SYSWARDEN v2.29 - TELEMETRY BACKEND
 # ==============================================================================
 function setup_telemetry_backend() {
     log "INFO" "Installation of the advanced telemetry engine (Backend)..."
@@ -4383,7 +4386,7 @@ EOF
 }
 
 # ==============================================================================
-# SYSWARDEN v2.28 - NGINX SECURE DASHBOARD (ENTERPRISE SAAS UI / SPA / CSP)
+# SYSWARDEN v2.29 - NGINX SECURE DASHBOARD (ENTERPRISE SAAS UI / SPA / CSP)
 # ==============================================================================
 function generate_dashboard() {
     log "INFO" "Generating the Enterprise SaaS Nginx Dashboard (SPA/Sidebar/CSP)..."
@@ -4536,7 +4539,7 @@ function generate_dashboard() {
             <svg style="color: var(--sw-brand-icon);" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
             <div class="d-flex align-items-baseline gap-2 hide-collapsed">
                 <span class="fs-5 fw-bold" style="color: var(--sw-brand-text); letter-spacing: -0.5px;">SYSWARDEN</span>
-                <span class="stat-label" style="margin-bottom: 0;">v2.28</span>
+                <span class="stat-label" style="margin-bottom: 0;">v2.29</span>
             </div>
         </div>
 
@@ -5872,7 +5875,7 @@ if [[ "$MODE" != "update" ]] && [[ "$MODE" != "uninstall" ]]; then
     echo -e "${RED}███████║   ██║   ███████║╚███╔███╔╝██║  ██║██║  ██║██████╔╝███████╗██║ ╚████║${NC}"
     echo -e "${RED}╚══════╝   ╚═╝   ╚══════╝ ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝ ╚══════╝╚═╝  ╚═══╝${NC}"
     echo -e "${BLUE}===================================================================================${NC}"
-    echo -e "${GREEN}               Advanced Firewall & Blocklist Orchestrator | v2.28                  ${NC}"
+    echo -e "${GREEN}               Advanced Firewall & Blocklist Orchestrator | v2.29                  ${NC}"
     echo -e "${BLUE}===================================================================================${NC}\n"
 fi
 
@@ -5893,7 +5896,7 @@ if [[ "$MODE" != "update" ]]; then
         CYAN='\033[0;36m'
         clear
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
-        echo -e "${GREEN}${BOLD}                   SYSWARDEN v2.28 - PRE-FLIGHT CHECKLIST                     ${NC}"
+        echo -e "${GREEN}${BOLD}                   SYSWARDEN v2.29 - PRE-FLIGHT CHECKLIST                     ${NC}"
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
         echo -e "Before proceeding with the deployment, please ensure you have the following"
         echo -e "information ready. If you lack any required data, press [Ctrl+C] to abort,"
