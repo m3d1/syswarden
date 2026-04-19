@@ -42,7 +42,7 @@ LOG_FILE="/var/log/syswarden-install.log"
 CONF_FILE="/etc/syswarden.conf"
 SET_NAME="syswarden_blacklist"
 TMP_DIR=$(mktemp -d)
-VERSION="v2.34"
+VERSION="v2.35"
 ACTIVE_PORTS=""
 SYSWARDEN_DIR="/etc/syswarden"
 WHITELIST_FILE="$SYSWARDEN_DIR/whitelist.txt"
@@ -3245,7 +3245,7 @@ def monitor_logs():
         proc_f2b.stdout.fileno(): 'f2b'
     }
 
-    # v2.34 Logic: STRICT filter on [SysWarden-BLOCK] only.
+    # v2.35 Logic: STRICT filter on [SysWarden-BLOCK] only.
     regex_fw = re.compile(r"\[SysWarden-BLOCK\].*?SRC=([\d\.]+).*?DPT=(\d+)")
     regex_f2b = re.compile(r"\[([a-zA-Z0-9_-]+)\]\s+Ban\s+([\d\.]+)")
 
@@ -3925,7 +3925,7 @@ uninstall_syswarden() {
     rm -rf /var/lib/syswarden/* 2>/dev/null || true
     # -------------------------------------------------------------------------
 
-    # --- Clean up all SysWarden Fail2ban filters (Including v2.34 additions) ---
+    # --- Clean up all SysWarden Fail2ban filters (Including v2.35 additions) ---
     for filter in nginx-scanner mariadb-auth mongodb-guard syswarden-privesc syswarden-portscan \
         syswarden-revshell syswarden-aibots syswarden-badbots syswarden-httpflood syswarden-webshell \
         syswarden-sqli-xss syswarden-secretshunter syswarden-ssrf syswarden-jndi-ssti syswarden-apimapper \
@@ -4126,7 +4126,7 @@ setup_wazuh_agent() {
 }
 
 # ==============================================================================
-# SYSWARDEN v2.34 - TELEMETRY BACKEND
+# SYSWARDEN v2.35 - TELEMETRY BACKEND
 # ==============================================================================
 function setup_telemetry_backend() {
     log "INFO" "Installation of the advanced telemetry engine (Backend)..."
@@ -4141,11 +4141,9 @@ set -euo pipefail
 IFS=$'\n\t'
 
 # --- SECURITY FIX: ZOMBIE PROCESS PREVENTION ---
-# Ensures all background processes spawned by Fail2ban checks are cleanly reaped.
 trap 'wait' EXIT
 
 # --- HOTFIX: ABSOLUTE MUTEX LOCK (ANTI-OVERLAP) ---
-# Prevents CPU leaks by ensuring only ONE instance can ever run mathematically
 exec 9>"/tmp/syswarden-telemetry.lock"
 if ! flock -n 9; then
     exit 0
@@ -4160,23 +4158,22 @@ DATA_FILE="$UI_DIR/data.json"
 
 mkdir -p "$UI_DIR"
 
-# Ensure jq is installed for atomic and safe JSON serialization
-if ! command -v jq >/dev/null; then apk add --no-cache jq >/dev/null 2>&1 || true; fi
+# --- HOTFIX: UNIVERSAL PACKAGE MANAGER ---
+if ! command -v jq >/dev/null; then
+    if [[ -f /etc/debian_version ]]; then apt-get install -y jq >/dev/null 2>&1 || true
+    elif [[ -f /etc/redhat-release ]]; then dnf install -y jq >/dev/null 2>&1 || true; fi
+fi
 
 # --- System Metrics Gathering ---
 SYS_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 SYS_HOSTNAME=$(hostname)
-# --- FIX: KERNEL EXTRACTION & FAULT-TOLERANT VARIABLES ---
-# 'uptime -p' crashes on Alpine/BusyBox. We calculate uptime directly from the kernel.
 SYS_UPTIME=$(awk '{d=int($1/86400); h=int(($1%86400)/3600); m=int(($1%3600)/60); if(d>0) printf "%dd %dh %dm", d, h, m; else printf "%dh %dm", h, m}' /proc/uptime 2>/dev/null || echo "Unknown")
 SYS_LOAD=$(cat /proc/loadavg 2>/dev/null | awk '{print $1", "$2", "$3}' || echo "0, 0, 0")
 
-# Bulletproof RAM parsing: Prevents 'set -e' crashes if 'free' output changes format
 SYS_RAM_USED=$(free -m 2>/dev/null | awk '/^Mem:/{print $3}')
 SYS_RAM_USED=${SYS_RAM_USED:-0}
 SYS_RAM_TOTAL=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}')
 SYS_RAM_TOTAL=${SYS_RAM_TOTAL:-0}
-
 # --- System Storage Gathering (Root) ---
 SYS_DISK_USED=$(df -m / 2>/dev/null | awk 'NR==2 {print $3}' || echo 0)
 SYS_DISK_TOTAL=$(df -m / 2>/dev/null | awk 'NR==2 {print $2}' || echo 1)
@@ -4211,7 +4208,7 @@ BANNED_IPS_JSON="[]"
 # --- Risk Radar Vectors ---
 R_EXP=0; R_BF=0; R_REC=0; R_DOS=0; R_ABU=0
 
-# HOTFIX: Strict timeouts to prevent Fail2ban socket deadlocks freezing the cron
+# HOTFIX: Strict timeouts to prevent Fail2ban socket deadlocks
 if command -v fail2ban-client >/dev/null && timeout 2 fail2ban-client ping >/dev/null 2>&1; then
     JAIL_LIST=$(timeout 2 fail2ban-client status 2>/dev/null | awk -F'Jail list:[ \t]*' '/Jail list:/ {print $2}' | tr -d ' ' | tr ',' '\n' || true)
     
@@ -4219,7 +4216,6 @@ if command -v fail2ban-client >/dev/null && timeout 2 fail2ban-client ping >/dev
         [[ -z "$JAIL" ]] && continue
         L7_ACTIVE_JAILS=$((L7_ACTIVE_JAILS + 1))
         
-        # HOTFIX: Abort jail query if it hangs for more than 3 seconds
         STATUS_OUT=$(timeout 3 fail2ban-client status "$JAIL" 2>/dev/null || echo "")
         
         if [[ -n "$STATUS_OUT" ]]; then
@@ -4228,7 +4224,6 @@ if command -v fail2ban-client >/dev/null && timeout 2 fail2ban-client ping >/dev
             L7_TOTAL_BANNED=$((L7_TOTAL_BANNED + BANNED_COUNT))
             
             if [[ "$BANNED_COUNT" -gt 0 ]]; then
-                # Safely append jail object using jq
                 JAILS_JSON=$(echo "$JAILS_JSON" | jq --arg n "$JAIL" --argjson c "$BANNED_COUNT" '. + [{"name": $n, "count": $c}]')
                 
                 # --- RISK RADAR CALCULATION ---
@@ -4238,66 +4233,27 @@ if command -v fail2ban-client >/dev/null && timeout 2 fail2ban-client ping >/dev
                 elif [[ "$JAIL" =~ (flood) ]]; then R_DOS=$((R_DOS + BANNED_COUNT))
                 else R_ABU=$((R_ABU + BANNED_COUNT)); fi
                 
-                # Extract and safely append IPs with Payload
                 BANNED_IPS=$(echo "$STATUS_OUT" | awk -F'Banned IP list:[ \t]*' '/Banned IP list:/ {print $2}' | tr -d ',' | tr ' ' '\n' | tail -n 50 || true)
                 for IP in $BANNED_IPS; do
                     if [[ -n "$IP" ]]; then
-                        # 1. Get the exact Ban Timestamp from Fail2ban
-                        TS=$(timeout 1 grep -F "[$JAIL] Ban $IP" /var/log/fail2ban.log | tail -n 1 | awk '{print $1" "$2}' | cut -d',' -f1 || true)
+                        # 1. Get the exact Ban Timestamp from Fail2ban (Supports Restore Ban after Upgrade/Restart)
+                        TS=$(timeout 1 grep -E "\[$JAIL\] (Ban|Restore Ban) $IP" /var/log/fail2ban.log | tail -n 1 | awk '{print $1" "$2}' | cut -d',' -f1 || true)
                         TS=${TS:-"Time Unknown"}
                         
-                        # 2. Dynamic Source Log Scraper (Multi-file & Error Handling)
+                        # 2. Dynamic Source Log Scraper (RAW LOGS ONLY as requested)
                         L7_PAYLOAD=""
-                        RAW_LOG=""
                         
                         if [[ "$JAIL" =~ (recidive) ]]; then
                             L7_PAYLOAD="Repeat Offender (Recidive Module)"
-                        elif [[ "$JAIL" =~ (portscan) ]]; then
-                            # KERNEL / FIREWALL Jails (Detects port probing)
-                            RAW_LOG=$(timeout 1 grep -h -F "$IP" /var/log/kern-firewall.log /var/log/kern.log /var/log/messages /var/log/syslog 2>/dev/null | grep -v "syswarden_reporter" | tail -n 1 || true)
-                            
-                            # DEVSECOPS FIX: Support both kernel native (DPT=XX) and SysWarden CLI format (PORT: XX)
-                            DPT=$(echo "$RAW_LOG" | grep -oE '(DPT=[0-9]+|PORT:[ \t]*[0-9]+)' || true)
-                            PROTO=$(echo "$RAW_LOG" | grep -oE 'PROTO=[A-Z]+' || true)
-                            
-                            if [[ -n "$DPT" ]]; then
-                                # Normalize 'PORT: 22' into 'DPT=22' for standard UI display
-                                DPT=$(echo "$DPT" | sed 's/PORT:[ \t]*/DPT=/')
-                                [[ -z "$PROTO" ]] && PROTO="PROTO=TCP" # Assume TCP by default if missing
-                                L7_PAYLOAD="Port Scan Probe -> $PROTO $DPT"
-                            else
-                                # SAFE Fallback with '|| true' to absolutely prevent 'set -e' script crashes
-                                L7_PAYLOAD=$(echo "$RAW_LOG" | grep -oE '(SysWarden-BLOCK|SysWarden-GEO).*' || true)
-                            fi
-                        elif [[ "$JAIL" =~ (sqli|xss|lfi|revshell|webshell|ssti|ssrf|jndi|scan|bot|mapper|enum|hunter|flood|proxy|prestashop|atlassian|wordpress|drupal|nginx|apache) ]]; then
-                            # Web Jails: Check Nginx and Apache access/error logs
-                            RAW_LOG=$(timeout 1 grep -h -F "$IP" /var/log/nginx/access.log /var/log/nginx/error.log /var/log/apache2/access.log /var/log/apache2/error.log /var/log/httpd/access_log /var/log/httpd/error_log 2>/dev/null | tail -n 1 || true)
-                            if [[ "$RAW_LOG" == *"\""* ]]; then
-                                # DEVSECOPS FIX: Smart Routing between URI Payload vs User-Agent Payload
-                                if [[ "$JAIL" =~ (bot|scan|mapper|enum|hunter|proxy) ]]; then
-                                    UA=$(echo "$RAW_LOG" | awk -F'"' '{print $6}')
-                                    if [[ -n "$UA" && "$UA" != "-" ]]; then
-                                        L7_PAYLOAD="Bot/UA -> $UA"
-                                    else
-                                        L7_PAYLOAD=$(echo "$RAW_LOG" | awk -F'"' '{print $2}')
-                                    fi
-                                else
-                                    L7_PAYLOAD=$(echo "$RAW_LOG" | awk -F'"' '{print $2}')
-                                fi
-                            else
-                                L7_PAYLOAD=$(echo "$RAW_LOG" | sed -E 's/^.*\[error\][0-9 #:]*//')
-                            fi
                         else
-                            # Auth/System/Mail Jails (Alpine heavily relies on /var/log/messages)
-                            RAW_LOG=$(timeout 1 grep -h -F "$IP" /var/log/auth-syswarden.log /var/log/secure /var/log/auth.log /var/log/maillog /var/log/mail.log /var/log/messages /var/log/syslog /var/log/fail2ban.log /var/log/daemon.log /var/log/audit/audit.log 2>/dev/null | grep -vE '(syswarden_reporter|fail2ban-server)' | tail -n 1 || true)
-                            L7_PAYLOAD=$(echo "$RAW_LOG" | sed -E 's/^.*[a-zA-Z]+\[[0-9]+\]:[ \t]*//')
+                            # Grab the raw log line that triggered the ban across all standard logs
+                            L7_PAYLOAD=$(timeout 1 grep -h -F "$IP" /var/log/kern-firewall.log /var/log/kern.log /var/log/messages /var/log/syslog /var/log/nginx/access.log /var/log/nginx/error.log /var/log/apache2/access.log /var/log/apache2/error.log /var/log/httpd/access_log /var/log/httpd/error_log /var/log/auth-syswarden.log /var/log/secure /var/log/auth.log /var/log/maillog /var/log/mail.log /var/log/daemon.log /var/log/audit/audit.log 2>/dev/null | grep -vE '(syswarden_reporter|fail2ban-server)' | tail -n 1 || true)
                         fi
                         
-                        # DEVSECOPS FIX: Secure Whitespace Trimming
+                        # Secure Whitespace Trimming
                         L7_PAYLOAD=$(echo "$L7_PAYLOAD" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' || true)
                         
-                        # Ultimate Fallback Matrix
-                        [[ -z "$L7_PAYLOAD" && -n "$RAW_LOG" ]] && L7_PAYLOAD="$RAW_LOG"
+                        # Ultimate Fallback
                         [[ -z "$L7_PAYLOAD" ]] && L7_PAYLOAD="Log rotated or payload obscured"
                         
                         # Safe JSON injection via jq --arg (Separated Timestamp and Payload for UI columns)
@@ -4309,13 +4265,13 @@ if command -v fail2ban-client >/dev/null && timeout 2 fail2ban-client ping >/dev
     done
 fi
 
-# --- DEVSECOPS: Top 10 Historical Attacking IPs (Aggregated & Bulletproof Alpine) ---
+# --- DEVSECOPS: Top 10 Historical Attacking IPs (Aggregated & Bulletproof) ---
 TOP_ATTACKERS_JSON="[]"
 TOP_STATS=""
 
-# We aggregate all possible log sources and catch both fresh "Ban" and F2B restart "Restore Ban"
+# FIX: We rely exclusively on Fail2ban's core log to avoid 100% CPU spikes from journalctl 7-day queries.
 TOP_STATS=$( { 
-    cat /var/log/fail2ban.log /var/log/messages 2>/dev/null || true
+    cat /var/log/fail2ban.log 2>/dev/null || true
 } | grep -E "\] (Restore )?Ban " | grep -Eo "([0-9]{1,3}\.){3}[0-9]{1,3}" | sort | uniq -c | sort -nr | head -n 10 || true )
 
 if [[ -n "$TOP_STATS" ]]; then
@@ -4325,7 +4281,6 @@ if [[ -n "$TOP_STATS" ]]; then
         fi
     done <<< "$TOP_STATS"
 fi
-# ------------------------------------------------------------------------------------
 
 # --- Whitelist Registry Extraction ---
 WHITELIST_COUNT=0
@@ -4341,7 +4296,7 @@ if [[ -f "$SYSWARDEN_DIR/whitelist.txt" ]]; then
     done
 fi
 
-# --- Generate Atomic JSON Payload (SECURITY FIX: jq escaping) ---
+# --- Generate Atomic JSON Payload ---
 RADAR_JSON=$(jq -n --argjson e "$R_EXP" --argjson b "$R_BF" --argjson r "$R_REC" --argjson d "$R_DOS" --argjson a "$R_ABU" '[$e, $b, $r, $d, $a]')
 
 jq -n \
@@ -4373,9 +4328,9 @@ jq -n \
   whitelist: { active_ips: $wlc, ips: $wlip }
 }' > "$TMP_FILE"
 
-# FIX: Strict ownership for Nginx web server (Read-Only access)
+# FIX: Strict ownership for Nginx web server (Universal OS handles both www-data and nginx users)
 mv -f "$TMP_FILE" "$DATA_FILE"
-chown nginx:nginx "$DATA_FILE" 2>/dev/null || true
+chown www-data:www-data "$DATA_FILE" 2>/dev/null || chown nginx:nginx "$DATA_FILE" 2>/dev/null || true
 chmod 640 "$DATA_FILE"
 EOF
 
@@ -4383,7 +4338,7 @@ EOF
     chmod +x "$BIN_PATH"
 
     # 3. Injection into CRON tasks (Execution every minute)
-    if ! crontab -l 2>/dev/null | grep -q "$BIN_PATH"; then
+    if ! crontab -l 2>/dev/null | grep "$BIN_PATH" >/dev/null; then
         (
             crontab -l 2>/dev/null || true
             echo "* * * * * $BIN_PATH >/dev/null 2>&1"
@@ -4397,7 +4352,7 @@ EOF
 }
 
 # ==============================================================================
-# SYSWARDEN v2.34 - NGINX SECURE DASHBOARD (ENTERPRISE SAAS UI / SPA / CSP)
+# SYSWARDEN v2.35 - NGINX SECURE DASHBOARD (ENTERPRISE SAAS UI / SPA / CSP)
 # ==============================================================================
 function generate_dashboard() {
     log "INFO" "Generating the Enterprise SaaS Nginx Dashboard (SPA/Sidebar/CSP)..."
@@ -4551,7 +4506,7 @@ function generate_dashboard() {
             <svg style="color: var(--sw-brand-icon);" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
             <div class="d-flex align-items-baseline gap-2 hide-collapsed">
                 <span class="fs-5 fw-bold" style="color: var(--sw-brand-text); letter-spacing: -0.5px;">SYSWARDEN</span>
-                <span class="stat-label" style="margin-bottom: 0;">v2.34</span>
+                <span class="stat-label" style="margin-bottom: 0;">v2.35</span>
             </div>
         </div>
 
@@ -5155,8 +5110,8 @@ document.addEventListener('DOMContentLoaded', () => {
             if(data.layer7.top_attackers.length > 0) {
                 topIpsEl.innerHTML = data.layer7.top_attackers.map(attacker => `
                     <tr>
-                        <td class="align-middle border-0 py-2 ps-4 font-mono"><a href="https://www.abuseipdb.com/check/${attacker.ip}" target="_blank" rel="noopener noreferrer" class="text-decoration-none fw-bold ip-font" style="color: var(--sw-text);">${attacker.ip}</a></td>
-                        <td class="text-end align-middle border-0 py-2 pe-4 font-mono fw-bold text-body-secondary">${attacker.count.toLocaleString()}</td>
+                        <td class="align-middle border-0 py-2 ps-4 font-mono"><a href="https://www.abuseipdb.com/check/${attacker.ip}" target="_blank" rel="noopener noreferrer" class="text-decoration-none ip-font" style="color: var(--sw-text);">${attacker.ip}</a></td>
+                        <td class="text-end align-middle border-0 py-2 pe-4 font-mono text-body-secondary">${attacker.count.toLocaleString()}</td>
                     </tr>`).join('');
             } else { topIpsEl.innerHTML = `<tr><td colspan="2" class="text-center text-muted small py-4 border-0">No attackers recorded.</td></tr>`; }
 
@@ -5165,7 +5120,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 jailsEl.innerHTML = [...data.layer7.jails_data].sort((a, b) => b.count - a.count).map(jail => `
                     <tr>
                         <td class="align-middle border-0 py-2 ps-4 font-mono"><span class="badge rounded-pill" style="${getJailBadgeStyle(jail.name)}">${jail.name}</span></td>
-                        <td class="text-end align-middle border-0 py-2 pe-4 font-mono fw-bold text-body-secondary">${jail.count}</td>
+                        <td class="text-end align-middle border-0 py-2 pe-4 font-mono text-body-secondary">${jail.count}</td>
                     </tr>`).join('');
             } else { jailsEl.innerHTML = `<tr><td colspan="2" class="text-center text-muted small py-4 border-0">No active jails loaded.</td></tr>`; }
 
@@ -5173,7 +5128,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if(data.layer7.banned_ips.length > 0) {
                 bannedEl.innerHTML = [...data.layer7.banned_ips].reverse().map(entry => `
                     <tr>
-                        <td class="align-middle border-0 py-2 ps-4 font-mono"><a href="https://www.abuseipdb.com/check/${entry.ip}" target="_blank" rel="noopener noreferrer" class="text-decoration-none fw-bold ip-font" style="color: var(--sw-text);">${entry.ip}</a></td>
+                        <td class="align-middle border-0 py-2 ps-4 font-mono"><a href="https://www.abuseipdb.com/check/${entry.ip}" target="_blank" rel="noopener noreferrer" class="text-decoration-none ip-font" style="color: var(--sw-text);">${entry.ip}</a></td>
                         <td class="align-middle border-0 py-2 font-mono"><span class="badge rounded-pill" style="${getJailBadgeStyle(entry.jail)}">${entry.jail}</span></td>
                         <td class="align-middle border-0 py-2 font-mono text-muted small" style="font-size: 0.75rem;">${entry.timestamp || 'N/A'}</td>
                         <td class="align-middle border-0 py-2 pe-4 font-mono text-muted small text-nowrap" style="font-size: 0.75rem;">${entry.payload || 'N/A'}</td>
@@ -5889,7 +5844,7 @@ if [[ "$MODE" != "update" ]] && [[ "$MODE" != "uninstall" ]]; then
     echo -e "${RED}███████║   ██║   ███████║╚███╔███╔╝██║  ██║██║  ██║██████╔╝███████╗██║ ╚████║${NC}"
     echo -e "${RED}╚══════╝   ╚═╝   ╚══════╝ ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝ ╚══════╝╚═╝  ╚═══╝${NC}"
     echo -e "${BLUE}===================================================================================${NC}"
-    echo -e "${GREEN}               Advanced Firewall & Blocklist Orchestrator | v2.34                  ${NC}"
+    echo -e "${GREEN}               Advanced Firewall & Blocklist Orchestrator | v2.35                  ${NC}"
     echo -e "${BLUE}===================================================================================${NC}\n"
 fi
 
@@ -5910,7 +5865,7 @@ if [[ "$MODE" != "update" ]]; then
         CYAN='\033[0;36m'
         clear
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
-        echo -e "${GREEN}${BOLD}                   SYSWARDEN v2.34 - PRE-FLIGHT CHECKLIST                     ${NC}"
+        echo -e "${GREEN}${BOLD}                   SYSWARDEN v2.35 - PRE-FLIGHT CHECKLIST                     ${NC}"
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
         echo -e "Before proceeding with the deployment, please ensure you have the following"
         echo -e "information ready. If you lack any required data, press [Ctrl+C] to abort,"
