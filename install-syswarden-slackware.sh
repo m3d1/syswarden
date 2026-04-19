@@ -34,7 +34,7 @@ CONF_FILE="/etc/syswarden.conf"
 SET_NAME="syswarden_blacklist"
 TMP_DIR=$(mktemp -d)
 # shellcheck disable=SC2034
-VERSION="v2.37"
+VERSION="v2.38"
 ACTIVE_PORTS=""
 SYSWARDEN_DIR="/etc/syswarden"
 WHITELIST_FILE="$SYSWARDEN_DIR/whitelist.txt"
@@ -2996,7 +2996,7 @@ EOF
 }
 
 # ==============================================================================
-# SYSWARDEN v2.37 - NGINX SECURE DASHBOARD (ENTERPRISE SAAS UI / SPA / CSP)
+# SYSWARDEN v2.38 - NGINX SECURE DASHBOARD (ENTERPRISE SAAS UI / SPA / CSP)
 # ==============================================================================
 function generate_dashboard() {
     log "INFO" "Generating the Enterprise SaaS Nginx Dashboard (SPA/Sidebar/CSP)..."
@@ -3145,7 +3145,7 @@ function generate_dashboard() {
             <svg style="color: var(--sw-brand-icon);" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
             <div class="d-flex align-items-baseline gap-2 hide-collapsed">
                 <span class="fs-5 fw-bold" style="color: var(--sw-brand-text); letter-spacing: -0.5px;">SYSWARDEN</span>
-                <span class="stat-label" style="margin-bottom: 0;">v2.37</span>
+                <span class="stat-label" style="margin-bottom: 0;">v2.38</span>
             </div>
         </div>
 
@@ -3260,7 +3260,7 @@ function generate_dashboard() {
                         <div class="col-xl-8">
                             <div class="card h-100">
                                 <div class="card-header bg-transparent pt-4 pb-0 px-4 d-flex align-items-center gap-2">
-                                    <span class="text-danger">📈</span> L7 Threat Telemetry (Live Timeline)
+                                    L7 Threat Telemetry (Live Timeline)
                                 </div>
                                 <div class="card-body p-4">
                                     <div class="chart-wrapper">
@@ -3272,7 +3272,7 @@ function generate_dashboard() {
                         <div class="col-xl-4">
                             <div class="card h-100">
                                 <div class="card-header bg-transparent pt-4 pb-0 px-4 d-flex align-items-center gap-2">
-                                    <span class="text-warning">🕸️</span> Global Risk Vectors
+                                    Global Risk Vectors
                                 </div>
                                 <div class="card-body p-4 d-flex align-items-center justify-content-center">
                                     <div style="position: relative; height: 280px; width: 100%;">
@@ -3287,7 +3287,7 @@ function generate_dashboard() {
                         <div class="col-12">
                             <div class="card h-100">
                                 <div class="card-header bg-transparent pt-4 pb-0 px-4 d-flex align-items-center gap-2">
-                                    <span class="text-success">🛡️</span> Filtration Efficiency (Signal vs Noise)
+                                    Filtration Efficiency (Signal vs Noise)
                                 </div>
                                 <div class="card-body p-4">
                                     <div class="row align-items-center">
@@ -3322,7 +3322,7 @@ function generate_dashboard() {
                     <div class="row g-4">
                         <div class="col-xl-6">
                             <div class="card h-100">
-                                <div class="card-header bg-transparent pt-4 pb-3 px-4 border-bottom-0">🎯 Top Attackers (OSINT History)</div>
+                                <div class="card-header bg-transparent pt-4 pb-3 px-4 border-bottom-0">Top Attackers (OSINT History)</div>
                                 <div class="card-body p-0">
                                     <div class="table-responsive table-container">
                                         <table class="table table-sm mb-0 small">
@@ -3341,7 +3341,7 @@ function generate_dashboard() {
                         
                         <div class="col-xl-6">
                             <div class="card h-100">
-                                <div class="card-header bg-transparent pt-4 pb-3 px-4 border-bottom-0">🏢 Jails Load Distribution</div>
+                                <div class="card-header bg-transparent pt-4 pb-3 px-4 border-bottom-0">Jails Load Distribution</div>
                                 <div class="card-body p-0">
                                     <div class="table-responsive table-container" style="max-height: 350px; overflow-y: auto;">
                                         <table class="table table-sm mb-0 small">
@@ -3360,7 +3360,7 @@ function generate_dashboard() {
 
                         <div class="col-12">
                             <div class="card">
-                                <div class="card-header bg-transparent pt-4 pb-3 px-4 border-bottom-0">🔴 L7 Banned IP Registry (Live Jail Allocations)</div>
+                                <div class="card-header bg-transparent pt-4 pb-3 px-4 border-bottom-0">L7 Banned IP Registry (Live Jail Allocations)</div>
                                 <div class="card-body p-0">
                                     <div class="table-responsive table-container" style="max-height: 450px;">
                                         <table class="table table-sm mb-0 small">
@@ -3421,7 +3421,7 @@ function generate_dashboard() {
                         <div class="col-xl-6">
                             <div class="card h-100">
                                 <div class="card-header bg-transparent pt-4 pb-3 px-4 text-uppercase fw-bold small text-muted">
-                                    ⚙️ Core Processes
+                                    Core Processes
                                 </div>
                                 <div class="card-body px-0 pt-0">
                                     <table class="table table-sm mb-0 small">
@@ -4139,7 +4139,7 @@ if [[ "$MODE" != "update" ]] && [[ "$MODE" != "uninstall" ]]; then
     echo -e "${RED}███████║   ██║   ███████║╚███╔███╔╝██║  ██║██║  ██║██████╔╝███████╗██║ ╚████║${NC}"
     echo -e "${RED}╚══════╝   ╚═╝   ╚══════╝ ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝ ╚══════╝╚═╝  ╚═══╝${NC}"
     echo -e "${BLUE}===================================================================================${NC}"
-    echo -e "${GREEN}               Advanced Firewall & Blocklist Orchestrator | v2.37                  ${NC}"
+    echo -e "${GREEN}               Advanced Firewall & Blocklist Orchestrator | v2.38                  ${NC}"
     echo -e "${BLUE}===================================================================================${NC}\n"
 fi
 
@@ -4158,7 +4158,7 @@ if [[ "$MODE" != "update" ]]; then
         CYAN='\033[0;36m'
         clear
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
-        echo -e "${GREEN}${BOLD}                   SYSWARDEN v2.37 - PRE-FLIGHT CHECKLIST                     ${NC}"
+        echo -e "${GREEN}${BOLD}                   SYSWARDEN v2.38 - PRE-FLIGHT CHECKLIST                     ${NC}"
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
         echo -e "Before proceeding with the deployment, please ensure you have the following"
         echo -e "information ready. If you lack any required data, press [Ctrl+C] to abort,"
