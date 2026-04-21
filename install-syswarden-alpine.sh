@@ -41,8 +41,11 @@ NC='\033[0m' # No Color
 LOG_FILE="/var/log/syswarden-install.log"
 CONF_FILE="/etc/syswarden.conf"
 SET_NAME="syswarden_blacklist"
-TMP_DIR=$(mktemp -d)
-VERSION="v2.43"
+# --- SECURITY FIX: SECURE TMP DIR ---
+# Ensure absolute privacy for the temporary directory to prevent unauthorized access
+TMP_DIR=$(mktemp -d -t syswarden-install-XXXXXX)
+chmod 0700 "$TMP_DIR"
+VERSION="v2.44"
 ACTIVE_PORTS=""
 SYSWARDEN_DIR="/etc/syswarden"
 WHITELIST_FILE="$SYSWARDEN_DIR/whitelist.txt"
@@ -134,7 +137,7 @@ install_dependencies() {
     fi
     # ==============================================================================
 
-    local deps="curl python3 py3-requests ipset fail2ban bash coreutils grep gawk sed procps logrotate ncurses whois rsyslog util-linux wireguard-tools libqrencode libqrencode-tools nginx openssl rsync openssh-client"
+    local deps="curl python3 py3-requests ipset fail2ban bash coreutils grep gawk sed procps logrotate ncurses whois rsyslog util-linux wireguard-tools libqrencode libqrencode-tools nginx openssl rsync openssh-client jq"
 
     if [[ "$FIREWALL_BACKEND" == "nftables" ]]; then
         deps="$deps nftables"
@@ -398,23 +401,34 @@ apply_os_hardening() {
                 continue
             fi
 
+            # --- SECURITY FIX: SYMLINK LPE PREVENTION (TOCTOU) ---
             local profile_file="$user_dir/.profile"
-            # Remove immutable flag if it exists, create/own it, then lock it forever
+
             chattr -i "$profile_file" 2>/dev/null || true
+            # Destroy malicious symlinks before creating the actual file
+            if [[ -L "$profile_file" ]]; then
+                rm -f "$profile_file"
+            fi
             touch "$profile_file"
-            chown "$user_name:$user_name" "$profile_file"
-            chmod 644 "$profile_file"
+            # Use '-h' to strictly prevent following symlinks if created microseconds before chown
+            chown -h "$user_name:$user_name" "$profile_file"
+            chmod 0644 "$profile_file"
             chattr +i "$profile_file" 2>/dev/null || true
 
             # Also lock .bashrc and .bash_profile if they exist (for users with bash installed)
             for extra_file in "$user_dir/.bashrc" "$user_dir/.bash_profile"; do
-                if [[ -f "$extra_file" ]]; then
+                # Check if it exists AND is a regular file (not a symlink)
+                if [[ -f "$extra_file" && ! -L "$extra_file" ]]; then
                     chattr -i "$extra_file" 2>/dev/null || true
-                    chown "$user_name:$user_name" "$extra_file"
-                    chmod 644 "$extra_file"
+                    chown -h "$user_name:$user_name" "$extra_file"
+                    chmod 0644 "$extra_file"
                     chattr +i "$extra_file" 2>/dev/null || true
+                elif [[ -L "$extra_file" ]]; then
+                    # Purge malicious symlinks masquerading as bash profiles
+                    rm -f "$extra_file"
                 fi
             done
+            # -----------------------------------------------------
         fi
     done
 }
@@ -551,11 +565,14 @@ define_ha_cluster() {
 PEER="$HA_PEER_IP"
 SSH_PORT="${SSH_PORT:-22}"
 
+# --- SECURITY FIX: MITM PREVENTION ON HA SYNC ---
+# Replaced 'no' with 'accept-new' to implicitly trust the first connection 
+# but strictly reject any subsequent fingerprint mismatch (ARP/DNS Spoofing).
 # 1. Sync custom lists
-rsync -a -e "ssh -p \$SSH_PORT -o StrictHostKeyChecking=no" /etc/syswarden/whitelist.txt /etc/syswarden/blocklist.txt root@\$PEER:/etc/syswarden/ 2>/dev/null
+rsync -a -e "ssh -p \$SSH_PORT -o StrictHostKeyChecking=accept-new" /etc/syswarden/whitelist.txt /etc/syswarden/blocklist.txt root@\$PEER:/etc/syswarden/ 2>/dev/null
 
 # 2. Trigger remote reload securely
-ssh -p \$SSH_PORT -o StrictHostKeyChecking=no root@\$PEER "/usr/local/bin/syswarden-telemetry.sh >/dev/null 2>&1" 2>/dev/null
+ssh -p \$SSH_PORT -o StrictHostKeyChecking=accept-new root@\$PEER "/usr/local/bin/syswarden-telemetry.sh >/dev/null 2>&1" 2>/dev/null
 EOF
         chmod +x "$SYNC_SCRIPT"
 
@@ -3346,7 +3363,7 @@ def monitor_logs():
         proc_f2b.stdout.fileno(): 'f2b'
     }
 
-    # v2.43 Logic: STRICT filter on [SysWarden-BLOCK] only.
+    # v2.44 Logic: STRICT filter on [SysWarden-BLOCK] only.
     regex_fw = re.compile(r"\[SysWarden-BLOCK\].*?SRC=([\d\.]+).*?DPT=(\d+)")
     regex_f2b = re.compile(r"\[([a-zA-Z0-9_-]+)\]\s+Ban\s+([\d\.]+)")
 
@@ -4242,7 +4259,7 @@ setup_wazuh_agent() {
 }
 
 # ==============================================================================
-# SYSWARDEN v2.43 - TELEMETRY BACKEND
+# SYSWARDEN v2.44 - TELEMETRY BACKEND
 # ==============================================================================
 function setup_telemetry_backend() {
     log "INFO" "Installation of the advanced telemetry engine (Backend)..."
@@ -4259,8 +4276,12 @@ IFS=$'\n\t'
 # --- SECURITY FIX: ZOMBIE PROCESS PREVENTION ---
 trap 'wait' EXIT
 
-# --- HOTFIX: ABSOLUTE MUTEX LOCK (ANTI-OVERLAP) ---
-exec 9>"/tmp/syswarden-telemetry.lock"
+# --- SECURITY FIX: ROOT-ONLY LOCK DIR (ANTI-DOS / ARBITRARY TRUNCATION) ---
+# Moves the lock file away from world-writable /tmp to prevent symlink destruction
+mkdir -p /var/run/syswarden
+chmod 0700 /var/run/syswarden
+
+exec 9>"/var/run/syswarden/syswarden-telemetry.lock"
 if ! flock -n 9; then
     exit 0
 fi
@@ -4269,15 +4290,17 @@ fi
 # --- Configuration Paths ---
 SYSWARDEN_DIR="/etc/syswarden"
 UI_DIR="/etc/syswarden/ui"
-TMP_FILE="$UI_DIR/data.json.tmp"
+# SECURITY FIX: Generate tmp file in native OS RAM (/var/run) to prevent race conditions.
+# Guaranteed to work on Alpine (tmpfs) and avoids /dev/shm LXC container missing mount issues.
+TMP_FILE="/var/run/syswarden/syswarden-data.json.tmp"
 DATA_FILE="$UI_DIR/data.json"
 
 mkdir -p "$UI_DIR"
 
-# --- HOTFIX: UNIVERSAL PACKAGE MANAGER ---
+# --- HOTFIX: MISSING DEPENDENCY INJECTION ---
+# Ensures jq is present on Alpine if skipped during the initial global install.
 if ! command -v jq >/dev/null; then
-    if [[ -f /etc/debian_version ]]; then apt-get install -y jq >/dev/null 2>&1 || true
-    elif [[ -f /etc/redhat-release ]]; then dnf install -y jq >/dev/null 2>&1 || true; fi
+    apk add --no-cache jq >/dev/null 2>&1 || true
 fi
 
 # --- System Metrics Gathering ---
@@ -4326,33 +4349,47 @@ SERVICES_JSON=$(jq -n \
 # --- Network Ports Gathering (ss) ---
 PORTS_JSON="[]"
 if command -v ss >/dev/null; then
-    while read -r proto state local_addr process; do
-        # Standardize protocol
+    # FIX: Override strict IFS temporarily using IFS=" ". 
+    # Since IFS=$'\n\t' is set globally, 'read' was swallowing the entire awk output into $proto.
+    while IFS=" " read -r proto state local_addr process; do
+        [[ -z "$proto" || -z "$state" || -z "$local_addr" ]] && continue
+        
+        # Standardize protocol nomenclature
         proto=$(echo "$proto" | tr 'a-z' 'A-Z')
         [[ "$proto" == "TCPV6" ]] && proto="TCP (v6)"
         [[ "$proto" == "UDPV6" ]] && proto="UDP (v6)"
         
-        # Parse Local IP and Port
+        # Parse Local IP and Port dynamically
+        # Last colon strictly separates IP and Port
         port="${local_addr##*:}"
         ip="${local_addr%:*}"
+        
+        # Strip IPv6 brackets and kernel interface bindings (e.g., 127.0.0.53%lo -> 127.0.0.53)
         ip="${ip//\[/}"
         ip="${ip//\]/}"
+        ip="${ip%%%*}"
+        
         [[ "$ip" == "*" || "$ip" == "0.0.0.0" || "$ip" == "::" ]] && ip="0.0.0.0 (Any)"
         
-        # Determine Interface
+        # Determine exact Interface dynamically
         interface="Any"
-        if [[ "$ip" == "127.0.0.1" || "$ip" == "::1" ]]; then interface="lo"
+        if [[ "$ip" == "127.0.0.1" || "$ip" == "::1" ]]; then 
+            interface="lo"
         elif [[ "$ip" != "0.0.0.0 (Any)" ]] && command -v ip >/dev/null; then
+            # Extract interface from routing table
             interface=$(ip -o addr show 2>/dev/null | grep -F "$ip" | awk '{print $2}' | head -n 1 || true)
             [[ -z "$interface" ]] && interface="Mapped"
         fi
         
-        # Parse Process Name and PID
+        # Parse Process Name and PID via robust Regex
         proc_name="System/Root"
         if [[ "$process" =~ \"([^\"]+)\",pid=([0-9]+) ]]; then
-            proc_name="${BASH_REMATCH[1]} (${BASH_REMATCH[2]})"
+            # Capitalize the process name for a premium UI display (e.g., nginx -> NGINX)
+            raw_pname="${BASH_REMATCH[1]}"
+            proc_name="${raw_pname^^} (${BASH_REMATCH[2]})"
         fi
         
+        # Append to JSON payload array securely
         PORTS_JSON=$(echo "$PORTS_JSON" | jq --arg i "$interface" --arg ip "$ip" --arg pr "$proc_name" --arg s "$state" --arg po "$port" --arg pt "$proto" '. + [{"interface": $i, "ip": $ip, "process": $pr, "state": $s, "port": $po, "protocol": $pt}]')
     done <<< "$(ss -tulpn 2>/dev/null | tail -n +2 | awk '{print $1, $2, $5, $NF}' || true)"
 fi
@@ -4542,10 +4579,14 @@ jq -n \
   whitelist: { active_ips: $wlc, ips: $wlip }
 }' > "$TMP_FILE"
 
-# FIX: Strict ownership for Nginx web server (Universal OS handles both www-data and nginx users)
+# --- SECURITY FIX: ATOMIC PERMISSIONS BEFORE MOVE ---
+# Apply ownership and permissions in /dev/shm BEFORE moving to the public Webroot.
+# This strictly prevents an attacker from reading the file during the microsecond gap.
+chown root:www-data "$TMP_FILE" 2>/dev/null || chown root:nginx "$TMP_FILE" 2>/dev/null || true
+chmod 0640 "$TMP_FILE"
+
+# Atomic move overwrites the old file instantly
 mv -f "$TMP_FILE" "$DATA_FILE"
-chown www-data:www-data "$DATA_FILE" 2>/dev/null || chown nginx:nginx "$DATA_FILE" 2>/dev/null || true
-chmod 640 "$DATA_FILE"
 EOF
 
     # 2. Make executable
@@ -4566,7 +4607,7 @@ EOF
 }
 
 # ==============================================================================
-# SYSWARDEN v2.43 - NGINX SECURE DASHBOARD (ENTERPRISE SAAS UI / SPA / CSP)
+# SYSWARDEN v2.44 - NGINX SECURE DASHBOARD (ENTERPRISE SAAS UI / SPA / CSP)
 # ==============================================================================
 function generate_dashboard() {
     log "INFO" "Generating the Enterprise SaaS Nginx Dashboard (SPA/Sidebar/CSP)..."
@@ -4715,7 +4756,7 @@ function generate_dashboard() {
             <svg style="color: var(--sw-brand-icon);" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
             <div class="d-flex align-items-baseline gap-2 hide-collapsed">
                 <span class="fs-5 fw-bold" style="color: var(--sw-brand-text); letter-spacing: -0.5px;">SYSWARDEN</span>
-                <span class="stat-label" style="margin-bottom: 0;">v2.43</span>
+                <span class="stat-label" style="margin-bottom: 0;">v2.44</span>
             </div>
         </div>
 
@@ -6175,7 +6216,7 @@ if [[ "$MODE" != "update" ]] && [[ "$MODE" != "uninstall" ]]; then
     echo -e "${RED}███████║   ██║   ███████║╚███╔███╔╝██║  ██║██║  ██║██████╔╝███████╗██║ ╚████║${NC}"
     echo -e "${RED}╚══════╝   ╚═╝   ╚══════╝ ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝ ╚══════╝╚═╝  ╚═══╝${NC}"
     echo -e "${BLUE}===================================================================================${NC}"
-    echo -e "${GREEN}               Advanced Firewall & Blocklist Orchestrator | v2.43                  ${NC}"
+    echo -e "${GREEN}               Advanced Firewall & Blocklist Orchestrator | v2.44                  ${NC}"
     echo -e "${BLUE}===================================================================================${NC}\n"
 fi
 
@@ -6197,7 +6238,7 @@ if [[ "$MODE" != "update" ]]; then
         CYAN='\033[0;36m'
         clear
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
-        echo -e "${GREEN}${BOLD}                   SYSWARDEN v2.43 - PRE-FLIGHT CHECKLIST                     ${NC}"
+        echo -e "${GREEN}${BOLD}                   SYSWARDEN v2.44 - PRE-FLIGHT CHECKLIST                     ${NC}"
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
         echo -e "Before proceeding with the deployment, please ensure you have the following"
         echo -e "information ready. If you lack any required data, press [Ctrl+C] to abort,"

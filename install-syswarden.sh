@@ -33,7 +33,7 @@ LOG_FILE="/var/log/syswarden-install.log"
 CONF_FILE="/etc/syswarden.conf"
 SET_NAME="syswarden_blacklist"
 TMP_DIR=$(mktemp -d)
-VERSION="v2.43"
+VERSION="v2.44"
 ACTIVE_PORTS=""
 SYSWARDEN_DIR="/etc/syswarden"
 WHITELIST_FILE="$SYSWARDEN_DIR/whitelist.txt"
@@ -662,20 +662,20 @@ auto_whitelist_admin() {
     # compatibility across all versions of ss and netstat, while grep -oE
     # perfectly extracts IPv4 even from IPv4-mapped IPv6 addresses (::ffff:IP).
     if [[ -z "$admin_ip" || ! "$admin_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        # Use 'ss' if available (modern iproute2)
-        if command -v ss >/dev/null; then
-            admin_ip=$(ss -tnp 2>/dev/null | grep -i 'estab' | grep -i 'sshd' | awk '{print $5}' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true)
-        # Fallback to 'netstat' (net-tools / Alpine busybox)
-        elif command -v netstat >/dev/null; then
-            admin_ip=$(netstat -tnpa 2>/dev/null | grep -i 'established' | grep -i 'sshd' | awk '{print $5}' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true)
+        local current_tty
+        current_tty=$(tty 2>/dev/null | sed 's#/dev/##' || true)
+
+        if [[ -n "$current_tty" && "$current_tty" != "not a tty" ]]; then
+            admin_ip=$(who 2>/dev/null | grep "$current_tty" | awk '{print $5}' | tr -d '()' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true)
         fi
     fi
 
-    # 3. Final Fallback: 'who' command
+    # Fallback ultime via les sockets SSHD si aucune TTY n'est détectée (ex: CI/CD Pipeline)
     if [[ -z "$admin_ip" || ! "$admin_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        admin_ip=$(who 2>/dev/null | awk '{print $5}' | tr -d '()' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true)
+        if command -v ss >/dev/null; then
+            admin_ip=$(ss -tnp 2>/dev/null | grep -i 'estab' | grep -i 'sshd' | awk '{print $5}' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true)
+        fi
     fi
-    # ---------------------------------------------------------
 
     # Process the IP
     if [[ "$admin_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && [[ "$admin_ip" != "127.0.0.1" ]]; then
@@ -1662,7 +1662,7 @@ EOF
             # 3. Allow WireGuard UDP port for tunnel establishment
             firewall-cmd --permanent --add-port="${WG_PORT:-51820}/udp" >/dev/null 2>&1 || true
 
-            # --- STRICT ZERO TRUST HIERARCHY (v2.43) - DEBIAN PARITY) ---
+            # --- STRICT ZERO TRUST HIERARCHY (v2.44) - DEBIAN PARITY) ---
 
             # Priority -1000: Highest priority. Allow SSH & Dashboard strictly from VPN.
             firewall-cmd --permanent --add-rich-rule="rule priority='-1000' family='ipv4' source address='${WG_SUBNET}' port port='${SSH_PORT:-22}' protocol='tcp' accept" >/dev/null 2>&1 || true
@@ -2950,10 +2950,14 @@ EOF
             # This detects internal lateral movement and brute-force attempts on PAM-aware services
             if [[ ! -f "/etc/fail2ban/filter.d/syswarden-privesc.conf" ]]; then
                 cat <<'EOF' >/etc/fail2ban/filter.d/syswarden-privesc.conf
+[INCLUDES]
+before = common.conf
+
 [Definition]
-failregex = ^.*(?:su|sudo)(?:\[\d+\])?: .*pam_unix\((?:su|sudo):auth\): authentication failure;.*rhost=<HOST>(?:\s+user=.*)?\s*$
-            ^.*(?:su|sudo)(?:\[\d+\])?: .*(?:FAILED SU|FAILED su|authentication failure).*rhost=<HOST>.*\s*$
-            ^.* PAM \d+ more authentication failures; logname=.* uid=.* euid=.* tty=.* ruser=.* rhost=<HOST>.*\s*$
+# --- DEVSECOPS OPTIMIZATION: STRICT ANCHORING ---
+failregex = ^%(__prefix_line)s.*pam_unix\((?:su|sudo):auth\): authentication failure;.*rhost=<HOST>(?:\s+user=.*)?\s*$
+            ^%(__prefix_line)s.*(?:FAILED SU|FAILED su|authentication failure).*rhost=<HOST>.*\s*$
+            ^%(__prefix_line)sPAM \d+ more authentication failures; logname=.* uid=.* euid=.* tty=.* ruser=.* rhost=<HOST>.*\s*$
 ignoreregex = 
 EOF
             fi
@@ -4341,7 +4345,7 @@ def monitor_logs():
     p = select.poll()
     p.register(f.stdout)
 
-    regex_fw = re.compile(r"\[SysWarden-(BLOCK|DOCKER)\].*SRC=([\d\.]+).*DPT=(\d+)")
+    regex_fw = re.compile(r"kernel:(?:\s*\[[ \d\.]+\])?\s*\[SysWarden-(BLOCK|DOCKER)\].*SRC=([\d\.]+).*DPT=(\d+)")
     regex_f2b = re.compile(r"\[([a-zA-Z0-9_-]+)\]\s+Ban\s+([\d\.]+)")
 
     while True:
@@ -5181,7 +5185,7 @@ EOF
 }
 
 # ==============================================================================
-# SYSWARDEN v2.43 - TELEMETRY BACKEND
+# SYSWARDEN v2.44 - TELEMETRY BACKEND
 # ==============================================================================
 function setup_telemetry_backend() {
     log "INFO" "Installation of the advanced telemetry engine (Backend)..."
@@ -5199,7 +5203,11 @@ IFS=$'\n\t'
 trap 'wait' EXIT
 
 # --- HOTFIX: ABSOLUTE MUTEX LOCK (ANTI-OVERLAP) ---
-exec 9>"/tmp/syswarden-telemetry.lock"
+LOCK_DIR="/var/run/syswarden"
+mkdir -p "$LOCK_DIR"
+chmod 700 "$LOCK_DIR"
+
+exec 9>"$LOCK_DIR/telemetry.lock"
 if ! flock -n 9; then
     exit 0
 fi
@@ -5265,33 +5273,47 @@ SERVICES_JSON=$(jq -n \
 # --- Network Ports Gathering (ss) ---
 PORTS_JSON="[]"
 if command -v ss >/dev/null; then
-    while read -r proto state local_addr process; do
-        # Standardize protocol
+    # FIX: Override strict IFS temporarily using IFS=" ". 
+    # Since IFS=$'\n\t' is set globally, 'read' was swallowing the entire awk output into $proto.
+    while IFS=" " read -r proto state local_addr process; do
+        [[ -z "$proto" || -z "$state" || -z "$local_addr" ]] && continue
+        
+        # Standardize protocol nomenclature
         proto=$(echo "$proto" | tr 'a-z' 'A-Z')
         [[ "$proto" == "TCPV6" ]] && proto="TCP (v6)"
         [[ "$proto" == "UDPV6" ]] && proto="UDP (v6)"
         
-        # Parse Local IP and Port
+        # Parse Local IP and Port dynamically
+        # Last colon strictly separates IP and Port
         port="${local_addr##*:}"
         ip="${local_addr%:*}"
+        
+        # Strip IPv6 brackets and kernel interface bindings (e.g., 127.0.0.53%lo -> 127.0.0.53)
         ip="${ip//\[/}"
         ip="${ip//\]/}"
+        ip="${ip%%%*}"
+        
         [[ "$ip" == "*" || "$ip" == "0.0.0.0" || "$ip" == "::" ]] && ip="0.0.0.0 (Any)"
         
-        # Determine Interface
+        # Determine exact Interface dynamically
         interface="Any"
-        if [[ "$ip" == "127.0.0.1" || "$ip" == "::1" ]]; then interface="lo"
+        if [[ "$ip" == "127.0.0.1" || "$ip" == "::1" ]]; then 
+            interface="lo"
         elif [[ "$ip" != "0.0.0.0 (Any)" ]] && command -v ip >/dev/null; then
+            # Extract interface from routing table
             interface=$(ip -o addr show 2>/dev/null | grep -F "$ip" | awk '{print $2}' | head -n 1 || true)
             [[ -z "$interface" ]] && interface="Mapped"
         fi
         
-        # Parse Process Name and PID
+        # Parse Process Name and PID via robust Regex
         proc_name="System/Root"
         if [[ "$process" =~ \"([^\"]+)\",pid=([0-9]+) ]]; then
-            proc_name="${BASH_REMATCH[1]} (${BASH_REMATCH[2]})"
+            # Capitalize the process name for a premium UI display (e.g., nginx -> NGINX)
+            raw_pname="${BASH_REMATCH[1]}"
+            proc_name="${raw_pname^^} (${BASH_REMATCH[2]})"
         fi
         
+        # Append to JSON payload array securely
         PORTS_JSON=$(echo "$PORTS_JSON" | jq --arg i "$interface" --arg ip "$ip" --arg pr "$proc_name" --arg s "$state" --arg po "$port" --arg pt "$proto" '. + [{"interface": $i, "ip": $ip, "process": $pr, "state": $s, "port": $po, "protocol": $pt}]')
     done <<< "$(ss -tulpn 2>/dev/null | tail -n +2 | awk '{print $1, $2, $5, $NF}' || true)"
 fi
@@ -5505,7 +5527,7 @@ EOF
 }
 
 # ==============================================================================
-# SYSWARDEN v2.43 - NGINX SECURE DASHBOARD (ENTERPRISE SAAS UI / SPA / CSP)
+# SYSWARDEN v2.44 - NGINX SECURE DASHBOARD (ENTERPRISE SAAS UI / SPA / CSP)
 # ==============================================================================
 function generate_dashboard() {
     log "INFO" "Generating the Enterprise SaaS Nginx Dashboard (SPA/Sidebar/CSP)..."
@@ -5513,9 +5535,16 @@ function generate_dashboard() {
     local UI_DIR="/etc/syswarden/ui"
     mkdir -p "$UI_DIR"
 
-    # HOTFIX: Directory Traversal for Nginx worker
-    chmod 755 /etc/syswarden
-    chmod 755 "$UI_DIR"
+    # --- SECURITY FIX: ZERO KNOWLEDGE FOR LOCAL USERS ---
+    chmod 750 /etc/syswarden
+    chmod 750 "$UI_DIR"
+
+    # Nginx load only
+    if id "www-data" >/dev/null 2>&1; then
+        chown root:www-data /etc/syswarden "$UI_DIR"
+    elif id "nginx" >/dev/null 2>&1; then
+        chown root:nginx /etc/syswarden "$UI_DIR"
+    fi
 
     # 1. Generating the HTML file (Enterprise Sidebar Structure)
     cat <<'EOF' >"$UI_DIR/index.html"
@@ -5654,7 +5683,7 @@ function generate_dashboard() {
             <svg style="color: var(--sw-brand-icon);" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
             <div class="d-flex align-items-baseline gap-2 hide-collapsed">
                 <span class="fs-5 fw-bold" style="color: var(--sw-brand-text); letter-spacing: -0.5px;">SYSWARDEN</span>
-                <span class="stat-label" style="margin-bottom: 0;">v2.43</span>
+                <span class="stat-label" style="margin-bottom: 0;">v2.44</span>
             </div>
         </div>
 
@@ -7199,7 +7228,7 @@ if [[ "$MODE" != "update" ]] && [[ "$MODE" != "uninstall" ]]; then
     echo -e "${RED}███████║   ██║   ███████║╚███╔███╔╝██║  ██║██║  ██║██████╔╝███████╗██║ ╚████║${NC}"
     echo -e "${RED}╚══════╝   ╚═╝   ╚══════╝ ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝ ╚══════╝╚═╝  ╚═══╝${NC}"
     echo -e "${BLUE}===================================================================================${NC}"
-    echo -e "${GREEN}               Advanced Firewall & Blocklist Orchestrator | v2.43                  ${NC}"
+    echo -e "${GREEN}               Advanced Firewall & Blocklist Orchestrator | v2.44                  ${NC}"
     echo -e "${BLUE}===================================================================================${NC}\n"
 fi
 
@@ -7238,7 +7267,7 @@ if [[ "$MODE" != "update" ]]; then
         CYAN='\033[0;36m'
         clear
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
-        echo -e "${GREEN}${BOLD}                   SYSWARDEN v2.43 - PRE-FLIGHT CHECKLIST                     ${NC}"
+        echo -e "${GREEN}${BOLD}                   SYSWARDEN v2.44 - PRE-FLIGHT CHECKLIST                     ${NC}"
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
         echo -e "Before proceeding with the deployment, please ensure you have the following"
         echo -e "information ready. If you lack any required data, press [Ctrl+C] to abort,"
