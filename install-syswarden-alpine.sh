@@ -45,7 +45,7 @@ SET_NAME="syswarden_blacklist"
 # Ensure absolute privacy for the temporary directory to prevent unauthorized access
 TMP_DIR=$(mktemp -d -t syswarden-install-XXXXXX)
 chmod 0700 "$TMP_DIR"
-VERSION="v2.47"
+VERSION="v2.48"
 ACTIVE_PORTS=""
 SYSWARDEN_DIR="/etc/syswarden"
 WHITELIST_FILE="$SYSWARDEN_DIR/whitelist.txt"
@@ -3363,7 +3363,7 @@ def monitor_logs():
         proc_f2b.stdout.fileno(): 'f2b'
     }
 
-    # v2.47 Logic: STRICT filter on [SysWarden-BLOCK] only.
+    # v2.48 Logic: STRICT filter on [SysWarden-BLOCK] only.
     regex_fw = re.compile(r"\[SysWarden-BLOCK\].*?SRC=([\d\.]+).*?DPT=(\d+)")
     regex_f2b = re.compile(r"\[([a-zA-Z0-9_-]+)\]\s+Ban\s+([\d\.]+)")
 
@@ -4259,7 +4259,7 @@ setup_wazuh_agent() {
 }
 
 # ==============================================================================
-# SYSWARDEN v2.47 - TELEMETRY BACKEND
+# SYSWARDEN v2.48 - TELEMETRY BACKEND
 # ==============================================================================
 function setup_telemetry_backend() {
     log "INFO" "Installation of the advanced telemetry engine (Backend)..."
@@ -4339,21 +4339,21 @@ FW_NAME="Unknown Firewall"
 FW_PATH="unknown"
 FW_STATUS="offline"
 
-if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
+# SECURITY FIX: Cron environments notoriously lack /usr/sbin in their PATH. 
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+
+# FIX: Robust L3 Kernel ruleset detection + Alpine OpenRC fallback
+if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qw "active"; then
     FW_NAME="ufw (Uncomplicated Firewall)"
     FW_PATH=$(command -v ufw)
     FW_STATUS="active"
-elif command -v nft >/dev/null 2>&1 && systemctl is-active --quiet nftables 2>/dev/null; then
+elif command -v nft >/dev/null 2>&1 && { nft list ruleset 2>/dev/null | grep -qE "(table|chain)" || rc-service nftables status 2>/dev/null | grep -qw "started"; }; then
     FW_NAME="netfilter/nftables"
     FW_PATH=$(command -v nft)
     FW_STATUS="active"
-elif command -v iptables >/dev/null 2>&1 && lsmod | grep -qE '^ip_tables'; then
+elif command -v iptables >/dev/null 2>&1 && iptables -nL 2>/dev/null | grep -q "Chain"; then
     FW_NAME="iptables (Legacy)"
     FW_PATH=$(command -v iptables)
-    FW_STATUS="active"
-elif lsmod | grep -qE '^ip_set'; then
-    FW_NAME="ipset (Standalone Module)"
-    FW_PATH=$(command -v ipset)
     FW_STATUS="active"
 fi
 
@@ -4365,7 +4365,7 @@ SERVICES_JSON=$(jq -n \
     {"name":"fail2ban-server","path":"/usr/bin/fail2ban-server","status":$f2b},
     {"name":$fw_name,"path":$fw_path,"status":$fw_status},
     {"name":"nginx (worker)","path":"/usr/sbin/nginx","status":$ngx},
-    {"name":"cron/crond","path":"/usr/sbin/cron","status":$crn},
+    {"name":"cron/crond","path":"/usr/sbin/crond","status":$crn},
     {"name":"syswarden-telemetry","path":"/usr/local/bin/syswarden-telemetry.sh","status":"active"}
   ]')
 
@@ -4436,13 +4436,13 @@ if command -v fail2ban-client >/dev/null && timeout 2 fail2ban-client ping >/dev
         STATUS_OUT=$(timeout 3 fail2ban-client status "$JAIL" 2>/dev/null || echo "")
         
         if [[ -n "$STATUS_OUT" ]]; then
-            BANNED_COUNT=$(echo "$STATUS_OUT" | awk '/Currently banned:/ {print $4}' || echo "0")
+            # SECURITY FIX: Strict Regex extraction to prevent awk column shifting
+            BANNED_COUNT=$(echo "$STATUS_OUT" | grep -i 'Currently banned:' | head -n 1 | grep -oE '[0-9]+' || echo "0")
             BANNED_COUNT=${BANNED_COUNT:-0}
             L7_TOTAL_BANNED=$((L7_TOTAL_BANNED + BANNED_COUNT))
             
             if [[ "$BANNED_COUNT" -gt 0 ]]; then
-                # --- THREAT INTEL: MITRE ATT&CK MAPPING (Advanced 51-Jails Coverage) ---
-                # Assign TTP (Tactic/Technique) based on strict Jail nomenclature
+                # --- THREAT INTEL: MITRE ATT&CK MAPPING ---
                 MITRE_ID="T1499" # Default: Endpoint Denial of Service
                 MITRE_NAME="Endpoint DoS"
                 
@@ -4508,7 +4508,7 @@ if command -v fail2ban-client >/dev/null && timeout 2 fail2ban-client ping >/dev
                 elif [[ "$JAIL" =~ (flood) ]]; then R_DOS=$((R_DOS + BANNED_COUNT))
                 else R_ABU=$((R_ABU + BANNED_COUNT)); fi
                 
-                BANNED_IPS=$(echo "$STATUS_OUT" | awk -F'Banned IP list:[ \t]*' '/Banned IP list:/ {print $2}' | tr -d ',' | tr ' ' '\n' | tail -n 50 || true)
+                BANNED_IPS=$(echo "$STATUS_OUT" | grep -i 'Banned IP list:' | head -n 1 | sed 's/.*Banned IP list://I' | tr -d ',' | tr -s ' \t' '\n' | grep -vE '^\s*$' | tail -n 50 || true)
                 for IP in $BANNED_IPS; do
                     if [[ -n "$IP" ]]; then
                         # 1. Get the exact Ban Timestamp from Fail2ban (Supports Restore Ban after Upgrade/Restart)
@@ -4658,7 +4658,7 @@ EOF
 }
 
 # ==============================================================================
-# SYSWARDEN v2.47 - NGINX SECURE DASHBOARD (ENTERPRISE SAAS UI / SPA / CSP)
+# SYSWARDEN v2.48 - NGINX SECURE DASHBOARD (ENTERPRISE SAAS UI / SPA / CSP)
 # ==============================================================================
 function generate_dashboard() {
     log "INFO" "Generating the Enterprise SaaS Nginx Dashboard (SPA/Sidebar/CSP)..."
@@ -4807,7 +4807,7 @@ function generate_dashboard() {
             <svg style="color: var(--sw-brand-icon);" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
             <div class="d-flex align-items-baseline gap-2 hide-collapsed">
                 <span class="fs-5 fw-bold" style="color: var(--sw-brand-text); letter-spacing: -0.5px;">SYSWARDEN</span>
-                <span class="stat-label" style="margin-bottom: 0;">v2.47</span>
+                <span class="stat-label" style="margin-bottom: 0;">v2.48</span>
             </div>
         </div>
 
@@ -5650,12 +5650,17 @@ EOF
 
     # --- 5. NGINX VHOST CONFIGURATION (ALPINE SPECIFIC PATH) ---
     log "INFO" "Configuring Nginx reverse proxy for port 9999..."
+
+    # DEVSECOPS FIX: Dynamic Nginx versioning to handle http2 directive deprecation (Nginx >= 1.25.1)
+    local NGINX_HTTP2_DIRECTIVE="listen 9999 ssl http2;"
+    if nginx -v 2>&1 | grep -qE "nginx/1\.(2[5-9]|[3-9][0-9])"; then
+        NGINX_HTTP2_DIRECTIVE="listen 9999 ssl;
+    http2 on;"
+    fi
+
     cat <<EOF >/etc/nginx/http.d/syswarden-ui.conf
 server {
-    # --- HOTFIX: CROSS-OS NGINX COMPATIBILITY ---
-    # Using 'listen ... http2' instead of 'http2 on;' ensures compatibility
-    # with older Nginx versions (<1.25.1) while remaining functional (with a warning) on modern versions.
-    listen 9999 ssl http2;
+    $NGINX_HTTP2_DIRECTIVE
     server_name _;
 
     # TLS Encryption
@@ -5668,13 +5673,8 @@ server {
     root $UI_DIR;
     index index.html;
     
-    # --- HOTFIX: EXPLICIT MIME TYPES ---
-    # Older OS/Nginx combinations lack .woff2 in their mime.types.
-    # Combined with 'nosniff', browsers strictly reject the font.
     include mime.types;
-    types {
-        font/woff2 woff2;
-    }
+    # SECURITY FIX: Removed custom woff2 type block. Modern Nginx already includes it in mime.types.
 
     # --- Security Access Control (Only Admin IP) ---
 $(echo -e "$NGINX_ALLOW_RULES")
@@ -6075,12 +6075,16 @@ show_alerts_dashboard() {
         src = substr($0, RSTART+4, RLENGTH-4)
         if (src == "") src = "N/A"
         
-        match($0, /DPT=[0-9]+/)
-        dpt = substr($0, RSTART+4, RLENGTH-4)
-        if (dpt == "") dpt = "N/A"
+        # --- HOTFIX: Dynamic Target Info (Port vs Protocol for ICMP/IGMP on Alpine) ---
+        target_info = "PORT: N/A"
+        if (match($0, /DPT=[0-9]+/)) {
+            target_info = "PORT: " substr($0, RSTART+4, RLENGTH-4)
+        } else if (match($0, /PROTO=[A-Za-z0-9]+/)) {
+            target_info = "PROTO: " substr($0, RSTART+6, RLENGTH-6)
+        }
         
         # Color coding: Grey Date, Blue Module, Red Action, Yellow IP, Cyan Target
-        printf "\033[1;30m%-19s\033[0m | \033[1;34m%-16s\033[0m | \033[1;31m%-10s\033[0m | \033[1;33m%-15s\033[0m | \033[1;36mPORT: %s\033[0m\n", date, module, "BLOCKED", src, dpt
+        printf "\033[1;30m%-19s\033[0m | \033[1;34m%-16s\033[0m | \033[1;31m%-10s\033[0m | \033[1;33m%-15s\033[0m | \033[1;36m%s\033[0m\n", date, module, "BLOCKED", src, target_info
         fflush(stdout)
         next
     }
@@ -6269,7 +6273,7 @@ if [[ "$MODE" != "update" ]] && [[ "$MODE" != "uninstall" ]]; then
     echo -e "${RED}███████║   ██║   ███████║╚███╔███╔╝██║  ██║██║  ██║██████╔╝███████╗██║ ╚████║${NC}"
     echo -e "${RED}╚══════╝   ╚═╝   ╚══════╝ ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝ ╚══════╝╚═╝  ╚═══╝${NC}"
     echo -e "${BLUE}===================================================================================${NC}"
-    echo -e "${GREEN}               Advanced Firewall & Blocklist Orchestrator | v2.47                  ${NC}"
+    echo -e "${GREEN}               Advanced Firewall & Blocklist Orchestrator | v2.48                  ${NC}"
     echo -e "${BLUE}===================================================================================${NC}\n"
 fi
 
@@ -6291,7 +6295,7 @@ if [[ "$MODE" != "update" ]]; then
         CYAN='\033[0;36m'
         clear
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
-        echo -e "${GREEN}${BOLD}                   SYSWARDEN v2.47 - PRE-FLIGHT CHECKLIST                     ${NC}"
+        echo -e "${GREEN}${BOLD}                   SYSWARDEN v2.48 - PRE-FLIGHT CHECKLIST                     ${NC}"
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
         echo -e "Before proceeding with the deployment, please ensure you have the following"
         echo -e "information ready. If you lack any required data, press [Ctrl+C] to abort,"

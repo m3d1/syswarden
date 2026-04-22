@@ -33,7 +33,7 @@ LOG_FILE="/var/log/syswarden-install.log"
 CONF_FILE="/etc/syswarden.conf"
 SET_NAME="syswarden_blacklist"
 TMP_DIR=$(mktemp -d)
-VERSION="v2.47"
+VERSION="v2.48"
 ACTIVE_PORTS=""
 SYSWARDEN_DIR="/etc/syswarden"
 WHITELIST_FILE="$SYSWARDEN_DIR/whitelist.txt"
@@ -1662,7 +1662,7 @@ EOF
             # 3. Allow WireGuard UDP port for tunnel establishment
             firewall-cmd --permanent --add-port="${WG_PORT:-51820}/udp" >/dev/null 2>&1 || true
 
-            # --- STRICT ZERO TRUST HIERARCHY (v2.47) - DEBIAN PARITY) ---
+            # --- STRICT ZERO TRUST HIERARCHY (v2.48) - DEBIAN PARITY) ---
 
             # Priority -1000: Highest priority. Allow SSH & Dashboard strictly from VPN.
             firewall-cmd --permanent --add-rich-rule="rule priority='-1000' family='ipv4' source address='${WG_SUBNET}' port port='${SSH_PORT:-22}' protocol='tcp' accept" >/dev/null 2>&1 || true
@@ -5185,7 +5185,7 @@ EOF
 }
 
 # ==============================================================================
-# SYSWARDEN v2.47 - TELEMETRY BACKEND
+# SYSWARDEN v2.48 - TELEMETRY BACKEND
 # ==============================================================================
 function setup_telemetry_backend() {
     log "INFO" "Installation of the advanced telemetry engine (Backend)..."
@@ -5263,25 +5263,26 @@ FW_NAME="Unknown Firewall"
 FW_PATH="unknown"
 FW_STATUS="offline"
 
-if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
+# SECURITY FIX: Cron environments notoriously lack /usr/sbin in their PATH. 
+# We explicitly export the full administrative PATH to resolve binaries like 'nft' or 'iptables'.
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+
+# FIX: Robust L3 Kernel ruleset detection + Systemd fallback for empty tables
+if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qw "active"; then
     FW_NAME="ufw (Uncomplicated Firewall)"
     FW_PATH=$(command -v ufw)
     FW_STATUS="active"
-elif command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld 2>/dev/null; then
+elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state 2>/dev/null | grep -qw "running"; then
     FW_NAME="firewalld"
     FW_PATH=$(command -v firewalld || command -v firewall-cmd)
     FW_STATUS="active"
-elif command -v nft >/dev/null 2>&1 && systemctl is-active --quiet nftables 2>/dev/null; then
+elif command -v nft >/dev/null 2>&1 && { nft list ruleset 2>/dev/null | grep -qE "(table|chain)" || systemctl is-active --quiet nftables 2>/dev/null; }; then
     FW_NAME="netfilter/nftables"
     FW_PATH=$(command -v nft)
     FW_STATUS="active"
-elif command -v iptables >/dev/null 2>&1 && lsmod | grep -qE '^ip_tables'; then
-    FW_NAME="iptables (Legacy)"
+elif command -v iptables >/dev/null 2>&1 && iptables -nL 2>/dev/null | grep -q "Chain"; then
+    FW_NAME="iptables"
     FW_PATH=$(command -v iptables)
-    FW_STATUS="active"
-elif lsmod | grep -qE '^ip_set'; then
-    FW_NAME="ipset (Standalone Module)"
-    FW_PATH=$(command -v ipset)
     FW_STATUS="active"
 fi
 
@@ -5364,7 +5365,8 @@ if command -v fail2ban-client >/dev/null && timeout 2 fail2ban-client ping >/dev
         STATUS_OUT=$(timeout 3 fail2ban-client status "$JAIL" 2>/dev/null || echo "")
         
         if [[ -n "$STATUS_OUT" ]]; then
-            BANNED_COUNT=$(echo "$STATUS_OUT" | awk '/Currently banned:/ {print $4}' || echo "0")
+            # SECURITY FIX: Strict Regex extraction to prevent awk column shifting in newer Fail2Ban versions
+            BANNED_COUNT=$(echo "$STATUS_OUT" | grep -i 'Currently banned:' | head -n 1 | grep -oE '[0-9]+' || echo "0")
             BANNED_COUNT=${BANNED_COUNT:-0}
             L7_TOTAL_BANNED=$((L7_TOTAL_BANNED + BANNED_COUNT))
             
@@ -5436,7 +5438,8 @@ if command -v fail2ban-client >/dev/null && timeout 2 fail2ban-client ping >/dev
                 elif [[ "$JAIL" =~ (flood) ]]; then R_DOS=$((R_DOS + BANNED_COUNT))
                 else R_ABU=$((R_ABU + BANNED_COUNT)); fi
                 
-                BANNED_IPS=$(echo "$STATUS_OUT" | awk -F'Banned IP list:[ \t]*' '/Banned IP list:/ {print $2}' | tr -d ',' | tr ' ' '\n' | tail -n 50 || true)
+                # FIX: Bulletproof extraction of Banned IP list regardless of formatting or line breaks
+                BANNED_IPS=$(echo "$STATUS_OUT" | grep -i 'Banned IP list:' | head -n 1 | sed 's/.*Banned IP list://I' | tr -d ',' | tr -s ' \t' '\n' | grep -vE '^\s*$' | tail -n 50 || true)
                 for IP in $BANNED_IPS; do
                     if [[ -n "$IP" ]]; then
                         # 1. Get the exact Ban Timestamp from Fail2ban (Supports Restore Ban after Upgrade/Restart)
@@ -5582,7 +5585,7 @@ EOF
 }
 
 # ==============================================================================
-# SYSWARDEN v2.47 - NGINX SECURE DASHBOARD (ENTERPRISE SAAS UI / SPA / CSP)
+# SYSWARDEN v2.48 - NGINX SECURE DASHBOARD (ENTERPRISE SAAS UI / SPA / CSP)
 # ==============================================================================
 function generate_dashboard() {
     log "INFO" "Generating the Enterprise SaaS Nginx Dashboard (SPA/Sidebar/CSP)..."
@@ -5738,7 +5741,7 @@ function generate_dashboard() {
             <svg style="color: var(--sw-brand-icon);" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
             <div class="d-flex align-items-baseline gap-2 hide-collapsed">
                 <span class="fs-5 fw-bold" style="color: var(--sw-brand-text); letter-spacing: -0.5px;">SYSWARDEN</span>
-                <span class="stat-label" style="margin-bottom: 0;">v2.47</span>
+                <span class="stat-label" style="margin-bottom: 0;">v2.48</span>
             </div>
         </div>
 
@@ -6584,9 +6587,16 @@ EOF
         NGINX_CONF_DIR="/etc/nginx/sites-available"
     fi
 
+    # DEVSECOPS FIX: Dynamic Nginx versioning to handle http2 directive deprecation (Nginx >= 1.25.1)
+    local NGINX_HTTP2_DIRECTIVE="listen 9999 ssl http2;"
+    if nginx -v 2>&1 | grep -qE "nginx/1\.(2[5-9]|[3-9][0-9])"; then
+        NGINX_HTTP2_DIRECTIVE="listen 9999 ssl;
+    http2 on;"
+    fi
+
     cat <<EOF >"$NGINX_CONF_DIR/syswarden-ui.conf"
 server {
-    listen 9999 ssl http2;
+    $NGINX_HTTP2_DIRECTIVE
     server_name _;
 
     ssl_certificate $SSL_DIR/syswarden.crt;
@@ -6597,11 +6607,9 @@ server {
 
     root $UI_DIR;
     index index.html;
-    
+
     include mime.types;
-    types {
-        font/woff2 woff2;
-    }
+    # SECURITY FIX: Removed custom woff2 type block. Modern Nginx already includes it in mime.types.
 
     # --- Security Access Control ---
 $(echo -e "$NGINX_ALLOW_RULES")
@@ -7063,12 +7071,17 @@ show_alerts_dashboard() {
                 src = substr($0, RSTART+4, RLENGTH-4)
             }
             
-            dpt = "N/A"
+            # --- HOTFIX: Dynamic Target Info (Port vs Protocol for ICMP/IGMP) ---
+            target_info = "PORT: N/A"
             if (match($0, /DPT=[0-9]+/)) {
-                dpt = substr($0, RSTART+4, RLENGTH-4)
+                # Extraction du port si présent (TCP/UDP)
+                target_info = "PORT: " substr($0, RSTART+4, RLENGTH-4)
+            } else if (match($0, /PROTO=[A-Za-z0-9]+/)) {
+                # Repli sur le protocole si pas de port (Ex: ICMP)
+                target_info = "PROTO: " substr($0, RSTART+6, RLENGTH-6)
             }
             
-            printf "\033[1;30m%-19s\033[0m | \033[1;34m%-16s\033[0m | \033[1;31m%-10s\033[0m | \033[1;33m%-15s\033[0m | \033[1;36mPORT: %s\033[0m\n", date, module, "BLOCKED", src, dpt
+            printf "\033[1;30m%-19s\033[0m | \033[1;34m%-16s\033[0m | \033[1;31m%-10s\033[0m | \033[1;33m%-15s\033[0m | \033[1;36m%s\033[0m\n", date, module, "BLOCKED", src, target_info
             
             # HOTFIX: Universal stdout flush (Works on Debian mawk, Alpine busybox, RHEL gawk)
             system("")
@@ -7285,7 +7298,7 @@ if [[ "$MODE" != "update" ]] && [[ "$MODE" != "uninstall" ]]; then
     echo -e "${RED}███████║   ██║   ███████║╚███╔███╔╝██║  ██║██║  ██║██████╔╝███████╗██║ ╚████║${NC}"
     echo -e "${RED}╚══════╝   ╚═╝   ╚══════╝ ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝ ╚══════╝╚═╝  ╚═══╝${NC}"
     echo -e "${BLUE}===================================================================================${NC}"
-    echo -e "${GREEN}               Advanced Firewall & Blocklist Orchestrator | v2.47                  ${NC}"
+    echo -e "${GREEN}               Advanced Firewall & Blocklist Orchestrator | v2.48                  ${NC}"
     echo -e "${BLUE}===================================================================================${NC}\n"
 fi
 
@@ -7324,7 +7337,7 @@ if [[ "$MODE" != "update" ]]; then
         CYAN='\033[0;36m'
         clear
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
-        echo -e "${GREEN}${BOLD}                   SYSWARDEN v2.47 - PRE-FLIGHT CHECKLIST                     ${NC}"
+        echo -e "${GREEN}${BOLD}                   SYSWARDEN v2.48 - PRE-FLIGHT CHECKLIST                     ${NC}"
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
         echo -e "Before proceeding with the deployment, please ensure you have the following"
         echo -e "information ready. If you lack any required data, press [Ctrl+C] to abort,"
