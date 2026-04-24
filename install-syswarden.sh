@@ -33,7 +33,7 @@ LOG_FILE="/var/log/syswarden-install.log"
 CONF_FILE="/etc/syswarden.conf"
 SET_NAME="syswarden_blacklist"
 TMP_DIR=$(mktemp -d)
-VERSION="v2.54"
+VERSION="v2.55"
 ACTIVE_PORTS=""
 SYSWARDEN_DIR="/etc/syswarden"
 WHITELIST_FILE="$SYSWARDEN_DIR/whitelist.txt"
@@ -1662,7 +1662,7 @@ EOF
             # 3. Allow WireGuard UDP port for tunnel establishment
             firewall-cmd --permanent --add-port="${WG_PORT:-51820}/udp" >/dev/null 2>&1 || true
 
-            # --- STRICT ZERO TRUST HIERARCHY (v2.54) - DEBIAN PARITY) ---
+            # --- STRICT ZERO TRUST HIERARCHY (v2.55) - DEBIAN PARITY) ---
 
             # Priority -1000: Highest priority. Allow SSH & Dashboard strictly from VPN.
             firewall-cmd --permanent --add-rich-rule="rule priority='-1000' family='ipv4' source address='${WG_SUBNET}' port port='${SSH_PORT:-22}' protocol='tcp' accept" >/dev/null 2>&1 || true
@@ -4345,7 +4345,7 @@ def monitor_logs():
     p = select.poll()
     p.register(f.stdout)
 
-    # v2.54 Logic: Universal Firewall Netfilter Regex (Matches Standard, Docker, GeoIP and ASN)
+    # v2.55 Logic: Universal Firewall Netfilter Regex (Matches Standard, Docker, GeoIP and ASN)
     regex_fw = re.compile(r"\[SysWarden-(BLOCK|DOCKER|GEO|ASN)\].*?SRC=([\d\.]+)")
     regex_dpt = re.compile(r"DPT=(\d+)")
     regex_f2b = re.compile(r"\[([a-zA-Z0-9_-]+)\]\s+Ban\s+([\d\.]+)")
@@ -5193,7 +5193,7 @@ EOF
 }
 
 # ==============================================================================
-# SYSWARDEN v2.54 - TELEMETRY BACKEND
+# SYSWARDEN v2.55 - TELEMETRY BACKEND
 # ==============================================================================
 function setup_telemetry_backend() {
     log "INFO" "Installation of the advanced telemetry engine (Backend)..."
@@ -5319,8 +5319,8 @@ SERVICES_JSON=$(jq -n \
 # --- Network Ports Gathering (ss) ---
 PORTS_JSON="[]"
 if command -v ss >/dev/null; then
-    # FIX: Override strict IFS temporarily using IFS=" ". 
-    while IFS=" " read -r proto state local_addr process; do
+    # DEVSECOPS FIX: Bulletproof awk parsing. Finds the exact IP:Port column regardless of OS shifting (Recv-Q/Send-Q).
+    while IFS=" " read -r proto state local_addr; do
         [[ -z "$proto" || -z "$state" || -z "$local_addr" ]] && continue
         
         # Standardize protocol nomenclature
@@ -5328,23 +5328,28 @@ if command -v ss >/dev/null; then
         [[ "$proto" == "TCPV6" ]] && proto="TCP (v6)"
         [[ "$proto" == "UDPV6" ]] && proto="UDP (v6)"
         
-        # Parse Local IP and Port dynamically
+        # Fallback if 'ss' omits the State column and shifts an integer (Recv-Q) into the State variable
+        if [[ "$state" =~ ^[0-9]+$ ]]; then
+            state="ACTIVE"
+        fi
+        
+        # Parse Local IP and Port dynamically (Strict matching via last colon)
         port="${local_addr##*:}"
         ip="${local_addr%:*}"
         
-        # Strip IPv6 brackets and kernel interface bindings
+        # Strip IPv6 brackets and kernel interface bindings (e.g. ::1%lo)
         ip="${ip//\[/}"
         ip="${ip//\]/}"
         ip="${ip%%%*}"
         
-        # We only want to show globally exposed ports (0.0.0.0 or ::) to keep the UI clean and relevant
+        # We exclusively track globally exposed ports (0.0.0.0 or ::) for the security dashboard
         if [[ "$ip" == "*" || "$ip" == "0.0.0.0" || "$ip" == "::" ]]; then
             ip="0.0.0.0 (Any)"
             
-            # Format nicely
+            # Inject securely into the JSON Array
             PORTS_JSON=$(echo "$PORTS_JSON" | jq --arg ip "$ip" --arg s "$state" --arg po "$port" --arg pt "$proto" '. + [{"ip": $ip, "state": $s, "port": $po, "protocol": $pt}]')
         fi
-    done <<< "$(ss -tulpn 2>/dev/null | tail -n +2 | awk '{print $1, $2, $4, $NF}' || true)"
+    done <<< "$(ss -tulpn 2>/dev/null | awk 'NR>1 {addr=""; for(i=3;i<=NF;i++){if($i~/:/ && $i!~/users:/){addr=$i; break}}; if(addr!="") print $1, $2, addr}' || true)"
 fi
 
 # --- Layer 7 Metrics & IP Registry (SECURE JSON ARRAYS) ---
@@ -5534,7 +5539,7 @@ EOF
 }
 
 # ==============================================================================
-# SYSWARDEN v2.54 - NGINX SECURE DASHBOARD (ENTERPRISE SAAS UI / SPA / CSP)
+# SYSWARDEN v2.55 - NGINX SECURE DASHBOARD (ENTERPRISE SAAS UI / SPA / CSP)
 # ==============================================================================
 function generate_dashboard() {
     log "INFO" "Generating the Enterprise SaaS Nginx Dashboard (SPA/CSP)..."
@@ -5628,7 +5633,7 @@ function generate_dashboard() {
     <nav class="top-navbar">
         <div class="d-flex align-items-center gap-3">
             <svg style="color: var(--sw-brand-icon);" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
-            <h5 class="mb-0 fw-bold d-none d-md-block text-uppercase" style="letter-spacing: 0.5px; font-size: 1.1rem; color: var(--sw-text);">SYSWARDEN v2.54</h5>
+            <h5 class="mb-0 fw-bold d-none d-md-block text-uppercase" style="letter-spacing: 0.5px; font-size: 1.1rem; color: var(--sw-text);">SYSWARDEN v2.55</h5>
         </div>
         
         <div class="d-flex align-items-center gap-3 gap-md-4">
@@ -6871,7 +6876,7 @@ if [[ "$MODE" != "update" ]] && [[ "$MODE" != "uninstall" ]]; then
     echo -e "${RED}███████║   ██║   ███████║╚███╔███╔╝██║  ██║██║  ██║██████╔╝███████╗██║ ╚████║${NC}"
     echo -e "${RED}╚══════╝   ╚═╝   ╚══════╝ ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝ ╚══════╝╚═╝  ╚═══╝${NC}"
     echo -e "${BLUE}===================================================================================${NC}"
-    echo -e "${GREEN}               Advanced Firewall & Blocklist Orchestrator | v2.54                  ${NC}"
+    echo -e "${GREEN}               Advanced Firewall & Blocklist Orchestrator | v2.55                  ${NC}"
     echo -e "${BLUE}===================================================================================${NC}\n"
 fi
 
@@ -6910,7 +6915,7 @@ if [[ "$MODE" != "update" ]]; then
         CYAN='\033[0;36m'
         clear
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
-        echo -e "${GREEN}${BOLD}                   SYSWARDEN v2.54 - PRE-FLIGHT CHECKLIST                     ${NC}"
+        echo -e "${GREEN}${BOLD}                   SYSWARDEN v2.55 - PRE-FLIGHT CHECKLIST                     ${NC}"
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
         echo -e "Before proceeding with the deployment, please ensure you have the following"
         echo -e "information ready. If you lack any required data, press [Ctrl+C] to abort,"
