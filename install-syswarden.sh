@@ -33,7 +33,7 @@ LOG_FILE="/var/log/syswarden-install.log"
 CONF_FILE="/etc/syswarden.conf"
 SET_NAME="syswarden_blacklist"
 TMP_DIR=$(mktemp -d)
-VERSION="v2.53"
+VERSION="v2.54"
 ACTIVE_PORTS=""
 SYSWARDEN_DIR="/etc/syswarden"
 WHITELIST_FILE="$SYSWARDEN_DIR/whitelist.txt"
@@ -1662,7 +1662,7 @@ EOF
             # 3. Allow WireGuard UDP port for tunnel establishment
             firewall-cmd --permanent --add-port="${WG_PORT:-51820}/udp" >/dev/null 2>&1 || true
 
-            # --- STRICT ZERO TRUST HIERARCHY (v2.53) - DEBIAN PARITY) ---
+            # --- STRICT ZERO TRUST HIERARCHY (v2.54) - DEBIAN PARITY) ---
 
             # Priority -1000: Highest priority. Allow SSH & Dashboard strictly from VPN.
             firewall-cmd --permanent --add-rich-rule="rule priority='-1000' family='ipv4' source address='${WG_SUBNET}' port port='${SSH_PORT:-22}' protocol='tcp' accept" >/dev/null 2>&1 || true
@@ -4345,7 +4345,7 @@ def monitor_logs():
     p = select.poll()
     p.register(f.stdout)
 
-    # v2.53 Logic: Universal Firewall Netfilter Regex (Matches Standard, Docker, GeoIP and ASN)
+    # v2.54 Logic: Universal Firewall Netfilter Regex (Matches Standard, Docker, GeoIP and ASN)
     regex_fw = re.compile(r"\[SysWarden-(BLOCK|DOCKER|GEO|ASN)\].*?SRC=([\d\.]+)")
     regex_dpt = re.compile(r"DPT=(\d+)")
     regex_f2b = re.compile(r"\[([a-zA-Z0-9_-]+)\]\s+Ban\s+([\d\.]+)")
@@ -5193,7 +5193,7 @@ EOF
 }
 
 # ==============================================================================
-# SYSWARDEN v2.53 - TELEMETRY BACKEND
+# SYSWARDEN v2.54 - TELEMETRY BACKEND
 # ==============================================================================
 function setup_telemetry_backend() {
     log "INFO" "Installation of the advanced telemetry engine (Backend)..."
@@ -5266,6 +5266,17 @@ SRV_F2B=$(pgrep -f fail2ban-server >/dev/null && echo "active" || echo "offline"
 SRV_CRON=$(pgrep -f "cron|crond" >/dev/null && echo "active" || echo "offline")
 SRV_NGX=$(pgrep -f "nginx" >/dev/null && echo "active" || echo "offline")
 
+# AbuseIPDB Reporter Tracking (3 States)
+if [[ -f "/usr/local/bin/syswarden_reporter.py" ]]; then
+    if pgrep -f "syswarden_reporter" >/dev/null; then
+        SRV_REP="active"
+    else
+        SRV_REP="offline"
+    fi
+else
+    SRV_REP="skipped"
+fi
+
 # --- DEVSECOPS: Advanced Dynamic Firewall Backend Detection ---
 FW_NAME="Unknown Firewall"
 FW_PATH="unknown"
@@ -5294,15 +5305,47 @@ elif command -v iptables >/dev/null 2>&1 && iptables -nL 2>/dev/null | grep -q "
 fi
 
 SERVICES_JSON=$(jq -n \
-  --arg f2b "$SRV_F2B" --arg crn "$SRV_CRON" --arg ngx "$SRV_NGX" \
+  --arg f2b "$SRV_F2B" --arg crn "$SRV_CRON" --arg ngx "$SRV_NGX" --arg rep "$SRV_REP" \
   --arg fw_name "$FW_NAME" --arg fw_path "$FW_PATH" --arg fw_status "$FW_STATUS" \
   '[
     {"name":"fail2ban-server","path":"/usr/bin/fail2ban-server","status":$f2b},
     {"name":$fw_name,"path":$fw_path,"status":$fw_status},
     {"name":"nginx (worker)","path":"/usr/sbin/nginx","status":$ngx},
     {"name":"cron/crond","path":"/usr/sbin/cron","status":$crn},
+    {"name":"syswarden-reporter","path":"/usr/local/bin/syswarden_reporter.py","status":$rep},
     {"name":"syswarden-telemetry","path":"/usr/local/bin/syswarden-telemetry.sh","status":"active"}
   ]')
+
+# --- Network Ports Gathering (ss) ---
+PORTS_JSON="[]"
+if command -v ss >/dev/null; then
+    # FIX: Override strict IFS temporarily using IFS=" ". 
+    while IFS=" " read -r proto state local_addr process; do
+        [[ -z "$proto" || -z "$state" || -z "$local_addr" ]] && continue
+        
+        # Standardize protocol nomenclature
+        proto=$(echo "$proto" | tr 'a-z' 'A-Z')
+        [[ "$proto" == "TCPV6" ]] && proto="TCP (v6)"
+        [[ "$proto" == "UDPV6" ]] && proto="UDP (v6)"
+        
+        # Parse Local IP and Port dynamically
+        port="${local_addr##*:}"
+        ip="${local_addr%:*}"
+        
+        # Strip IPv6 brackets and kernel interface bindings
+        ip="${ip//\[/}"
+        ip="${ip//\]/}"
+        ip="${ip%%%*}"
+        
+        # We only want to show globally exposed ports (0.0.0.0 or ::) to keep the UI clean and relevant
+        if [[ "$ip" == "*" || "$ip" == "0.0.0.0" || "$ip" == "::" ]]; then
+            ip="0.0.0.0 (Any)"
+            
+            # Format nicely
+            PORTS_JSON=$(echo "$PORTS_JSON" | jq --arg ip "$ip" --arg s "$state" --arg po "$port" --arg pt "$proto" '. + [{"ip": $ip, "state": $s, "port": $po, "protocol": $pt}]')
+        fi
+    done <<< "$(ss -tulpn 2>/dev/null | tail -n +2 | awk '{print $1, $2, $4, $NF}' || true)"
+fi
 
 # --- Layer 7 Metrics & IP Registry (SECURE JSON ARRAYS) ---
 L7_TOTAL_BANNED=0; L7_ACTIVE_JAILS=0
@@ -5458,10 +5501,11 @@ jq -n \
   --argjson wlc "$WHITELIST_COUNT" \
   --argjson wlip "$WL_JSON" \
   --argjson srv "$SERVICES_JSON" \
+  --argjson pts "$PORTS_JSON" \
   --argjson rad "$RADAR_JSON" \
 '{
   timestamp: $ts,
-  system: { hostname: $host, uptime: $up, load_average: $load, ram_used_mb: $ru, ram_total_mb: $rt, disk_used_mb: $du, disk_total_mb: $dt, services: $srv, cores: $cores, arch: $arch, os: $os, cpu_model: $cpu },
+  system: { hostname: $host, uptime: $up, load_average: $load, ram_used_mb: $ru, ram_total_mb: $rt, disk_used_mb: $du, disk_total_mb: $dt, services: $srv, cores: $cores, arch: $arch, os: $os, cpu_model: $cpu, ports: $pts },
   layer3: { global_blocked: $lg, geoip_blocked: $lgeo, asn_blocked: $lasn },
   layer7: { total_banned: $ltb, active_jails: $laj, jails_data: $jj, banned_ips: $bip, top_attackers: $top, risk_radar: $rad },
   whitelist: { active_ips: $wlc, ips: $wlip }
@@ -5490,7 +5534,7 @@ EOF
 }
 
 # ==============================================================================
-# SYSWARDEN v2.53 - NGINX SECURE DASHBOARD (ENTERPRISE SAAS UI / SPA / CSP)
+# SYSWARDEN v2.54 - NGINX SECURE DASHBOARD (ENTERPRISE SAAS UI / SPA / CSP)
 # ==============================================================================
 function generate_dashboard() {
     log "INFO" "Generating the Enterprise SaaS Nginx Dashboard (SPA/CSP)..."
@@ -5584,7 +5628,7 @@ function generate_dashboard() {
     <nav class="top-navbar">
         <div class="d-flex align-items-center gap-3">
             <svg style="color: var(--sw-brand-icon);" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
-            <h5 class="mb-0 fw-bold d-none d-md-block text-uppercase" style="letter-spacing: 0.5px; font-size: 1.1rem; color: var(--sw-text);">SYSWARDEN v2.53</h5>
+            <h5 class="mb-0 fw-bold d-none d-md-block text-uppercase" style="letter-spacing: 0.5px; font-size: 1.1rem; color: var(--sw-text);">SYSWARDEN v2.54</h5>
         </div>
         
         <div class="d-flex align-items-center gap-3 gap-md-4">
@@ -5630,7 +5674,9 @@ function generate_dashboard() {
                         <div class="font-mono small"><span class="text-muted">RAM:</span> <span id="sys-ram" class="ms-1">-- MB</span></div>
                         <div class="font-mono small"><span class="text-muted">Storage (Root):</span> <span id="sys-disk" class="ms-1">-- GB</span></div>
                     </div>
-                    <div class="d-flex flex-wrap gap-3 align-items-center pt-1 font-mono small" id="sys-services-list">
+                    <div class="d-flex flex-wrap gap-3 align-items-center border-bottom pb-2 pt-1 font-mono small" id="sys-services-list" style="border-color: var(--sw-border) !important;">
+                        </div>
+                    <div class="d-flex flex-wrap gap-3 align-items-center pt-1 font-mono small" id="sys-ports-list">
                         </div>
                 </div>
             </div>
@@ -5935,9 +5981,24 @@ function generate_dashboard() {
                 if(data.system.services && srvEl) {
                     srvEl.innerHTML = data.system.services.map(srv => {
                         const shortName = srv.name.split(' ')[0];
-                        const statusClass = srv.status === 'active' ? 'text-success' : 'text-danger';
+                        // Handle 3 states: active (green), skipped (yellow), offline (red)
+                        const statusClass = srv.status === 'active' ? 'text-success' : (srv.status === 'skipped' ? 'text-warning opacity-75' : 'text-danger');
                         return `<span class="text-muted">${shortName}:</span> <span class="${statusClass}">${srv.status.toUpperCase()}</span>`;
                     }).join(' <span class="text-muted opacity-50 px-2">|</span> ');
+                }
+
+                // NEW: Flat Network Ports Listing (Horizontal inline rendering)
+                const portsEl = document.getElementById('sys-ports-list');
+                if(data.system.ports && portsEl) {
+                    if (data.system.ports.length > 0) {
+                        portsEl.innerHTML = data.system.ports.map(p => {
+                            // Extract just the port number
+                            const safePort = (p.port && p.port.trim() !== '' && p.port !== '*') ? p.port : 'N/A';
+                            return `<span class="text-muted">${p.protocol || 'TCP'}:</span> <span style="color: var(--sw-brand-icon); font-weight: 700;">${safePort}</span>`;
+                        }).join(' <span class="text-muted opacity-50 px-2">|</span> ');
+                    } else {
+                        portsEl.innerHTML = '<span class="text-muted fst-italic">No external ports exposed. Architecture is fully locked down.</span>';
+                    }
                 }
 
                 // Layer 3 & 7 Metrics
@@ -6810,7 +6871,7 @@ if [[ "$MODE" != "update" ]] && [[ "$MODE" != "uninstall" ]]; then
     echo -e "${RED}███████║   ██║   ███████║╚███╔███╔╝██║  ██║██║  ██║██████╔╝███████╗██║ ╚████║${NC}"
     echo -e "${RED}╚══════╝   ╚═╝   ╚══════╝ ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝ ╚══════╝╚═╝  ╚═══╝${NC}"
     echo -e "${BLUE}===================================================================================${NC}"
-    echo -e "${GREEN}               Advanced Firewall & Blocklist Orchestrator | v2.53                  ${NC}"
+    echo -e "${GREEN}               Advanced Firewall & Blocklist Orchestrator | v2.54                  ${NC}"
     echo -e "${BLUE}===================================================================================${NC}\n"
 fi
 
@@ -6849,7 +6910,7 @@ if [[ "$MODE" != "update" ]]; then
         CYAN='\033[0;36m'
         clear
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
-        echo -e "${GREEN}${BOLD}                   SYSWARDEN v2.53 - PRE-FLIGHT CHECKLIST                     ${NC}"
+        echo -e "${GREEN}${BOLD}                   SYSWARDEN v2.54 - PRE-FLIGHT CHECKLIST                     ${NC}"
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
         echo -e "Before proceeding with the deployment, please ensure you have the following"
         echo -e "information ready. If you lack any required data, press [Ctrl+C] to abort,"
