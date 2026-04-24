@@ -33,7 +33,7 @@ LOG_FILE="/var/log/syswarden-install.log"
 CONF_FILE="/etc/syswarden.conf"
 SET_NAME="syswarden_blacklist"
 TMP_DIR=$(mktemp -d)
-VERSION="v2.50"
+VERSION="v2.51"
 ACTIVE_PORTS=""
 SYSWARDEN_DIR="/etc/syswarden"
 WHITELIST_FILE="$SYSWARDEN_DIR/whitelist.txt"
@@ -1662,7 +1662,7 @@ EOF
             # 3. Allow WireGuard UDP port for tunnel establishment
             firewall-cmd --permanent --add-port="${WG_PORT:-51820}/udp" >/dev/null 2>&1 || true
 
-            # --- STRICT ZERO TRUST HIERARCHY (v2.50) - DEBIAN PARITY) ---
+            # --- STRICT ZERO TRUST HIERARCHY (v2.51) - DEBIAN PARITY) ---
 
             # Priority -1000: Highest priority. Allow SSH & Dashboard strictly from VPN.
             firewall-cmd --permanent --add-rich-rule="rule priority='-1000' family='ipv4' source address='${WG_SUBNET}' port port='${SSH_PORT:-22}' protocol='tcp' accept" >/dev/null 2>&1 || true
@@ -5185,7 +5185,7 @@ EOF
 }
 
 # ==============================================================================
-# SYSWARDEN v2.50 - TELEMETRY BACKEND
+# SYSWARDEN v2.51 - TELEMETRY BACKEND
 # ==============================================================================
 function setup_telemetry_backend() {
     log "INFO" "Installation of the advanced telemetry engine (Backend)..."
@@ -5267,7 +5267,6 @@ FW_STATUS="offline"
 # We explicitly export the full administrative PATH to resolve binaries like 'nft' or 'iptables'.
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 
-# FIX: Robust L3 Kernel ruleset detection + Systemd fallback for empty tables
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qw "active"; then
     FW_NAME="ufw (Uncomplicated Firewall)"
     FW_PATH=$(command -v ufw)
@@ -5286,7 +5285,6 @@ elif command -v iptables >/dev/null 2>&1 && iptables -nL 2>/dev/null | grep -q "
     FW_STATUS="active"
 fi
 
-# FIX: Added dynamic firewall detection and absolute binary paths for frontend display
 SERVICES_JSON=$(jq -n \
   --arg f2b "$SRV_F2B" --arg crn "$SRV_CRON" --arg ngx "$SRV_NGX" \
   --arg fw_name "$FW_NAME" --arg fw_path "$FW_PATH" --arg fw_status "$FW_STATUS" \
@@ -5298,54 +5296,6 @@ SERVICES_JSON=$(jq -n \
     {"name":"syswarden-telemetry","path":"/usr/local/bin/syswarden-telemetry.sh","status":"active"}
   ]')
 
-# --- Network Ports Gathering (ss) ---
-PORTS_JSON="[]"
-if command -v ss >/dev/null; then
-    # FIX: Override strict IFS temporarily using IFS=" ". 
-    # Since IFS=$'\n\t' is set globally, 'read' was swallowing the entire awk output into $proto.
-    while IFS=" " read -r proto state local_addr process; do
-        [[ -z "$proto" || -z "$state" || -z "$local_addr" ]] && continue
-        
-        # Standardize protocol nomenclature
-        proto=$(echo "$proto" | tr 'a-z' 'A-Z')
-        [[ "$proto" == "TCPV6" ]] && proto="TCP (v6)"
-        [[ "$proto" == "UDPV6" ]] && proto="UDP (v6)"
-        
-        # Parse Local IP and Port dynamically
-        # Last colon strictly separates IP and Port
-        port="${local_addr##*:}"
-        ip="${local_addr%:*}"
-        
-        # Strip IPv6 brackets and kernel interface bindings (e.g., 127.0.0.53%lo -> 127.0.0.53)
-        ip="${ip//\[/}"
-        ip="${ip//\]/}"
-        ip="${ip%%%*}"
-        
-        [[ "$ip" == "*" || "$ip" == "0.0.0.0" || "$ip" == "::" ]] && ip="0.0.0.0 (Any)"
-        
-        # Determine exact Interface dynamically
-        interface="Any"
-        if [[ "$ip" == "127.0.0.1" || "$ip" == "::1" ]]; then 
-            interface="lo"
-        elif [[ "$ip" != "0.0.0.0 (Any)" ]] && command -v ip >/dev/null; then
-            # Extract interface from routing table
-            interface=$(ip -o addr show 2>/dev/null | grep -F "$ip" | awk '{print $2}' | head -n 1 || true)
-            [[ -z "$interface" ]] && interface="Mapped"
-        fi
-        
-        # Parse Process Name and PID via robust Regex
-        proc_name="System/Root"
-        if [[ "$process" =~ \"([^\"]+)\",pid=([0-9]+) ]]; then
-            # Capitalize the process name for a premium UI display (e.g., nginx -> NGINX)
-            raw_pname="${BASH_REMATCH[1]}"
-            proc_name="${raw_pname^^} (${BASH_REMATCH[2]})"
-        fi
-        
-        # Append to JSON payload array securely
-        PORTS_JSON=$(echo "$PORTS_JSON" | jq --arg i "$interface" --arg ip "$ip" --arg pr "$proc_name" --arg s "$state" --arg po "$port" --arg pt "$proto" '. + [{"interface": $i, "ip": $ip, "process": $pr, "state": $s, "port": $po, "protocol": $pt}]')
-    done <<< "$(ss -tulpn 2>/dev/null | tail -n +2 | awk '{print $1, $2, $5, $NF}' || true)"
-fi
-
 # --- Layer 7 Metrics & IP Registry (SECURE JSON ARRAYS) ---
 L7_TOTAL_BANNED=0; L7_ACTIVE_JAILS=0
 JAILS_JSON="[]"
@@ -5354,7 +5304,6 @@ BANNED_IPS_JSON="[]"
 # --- Risk Radar Vectors ---
 R_EXP=0; R_BF=0; R_REC=0; R_DOS=0; R_ABU=0
 
-# HOTFIX: Strict timeouts to prevent Fail2ban socket deadlocks
 if command -v fail2ban-client >/dev/null && timeout 2 fail2ban-client ping >/dev/null 2>&1; then
     JAIL_LIST=$(timeout 2 fail2ban-client status 2>/dev/null | awk -F'Jail list:[ \t]*' '/Jail list:/ {print $2}' | tr -d ' ' | tr ',' '\n' || true)
     
@@ -5365,70 +5314,31 @@ if command -v fail2ban-client >/dev/null && timeout 2 fail2ban-client ping >/dev
         STATUS_OUT=$(timeout 3 fail2ban-client status "$JAIL" 2>/dev/null || echo "")
         
         if [[ -n "$STATUS_OUT" ]]; then
-            # SECURITY FIX: Strict Regex extraction to prevent awk column shifting in newer Fail2Ban versions
             BANNED_COUNT=$(echo "$STATUS_OUT" | grep -i 'Currently banned:' | head -n 1 | grep -oE '[0-9]+' || echo "0")
             BANNED_COUNT=${BANNED_COUNT:-0}
             L7_TOTAL_BANNED=$((L7_TOTAL_BANNED + BANNED_COUNT))
             
             if [[ "$BANNED_COUNT" -gt 0 ]]; then
-                # --- THREAT INTEL: MITRE ATT&CK MAPPING (Advanced 51-Jails Coverage) ---
-                # Assign TTP (Tactic/Technique) based on strict Jail nomenclature
-                MITRE_ID="T1499" # Default: Endpoint Denial of Service
+                # --- THREAT INTEL: MITRE ATT&CK MAPPING ---
+                MITRE_ID="T1499" # Default
                 MITRE_NAME="Endpoint DoS"
                 
                 case "${JAIL,,}" in
-                    *webshell*)
-                        MITRE_ID="T1505.003"
-                        MITRE_NAME="Server Software Component: Web Shell"
-                        ;;
-                    *revshell*|*rce*)
-                        MITRE_ID="T1059"
-                        MITRE_NAME="Command and Scripting Interpreter"
-                        ;;
-                    *sqli*|*xss*|*lfi*|*ssti*|*jndi*|*haproxy*)
-                        MITRE_ID="T1190"
-                        MITRE_NAME="Exploit Public-Facing Application"
-                        ;;
-                    *privesc*|*auditd*)
-                        MITRE_ID="T1068"
-                        MITRE_NAME="Exploitation for Privilege Escalation"
-                        ;;
-                    *secretshunter*|*hunter*|*ssrf*|*idor*)
-                        MITRE_ID="T1552"
-                        MITRE_NAME="Unsecured Credentials / Cloud Discovery"
-                        ;;
-                    *proxy-abuse*|*squid*)
-                        MITRE_ID="T1090"
-                        MITRE_NAME="Connection Proxy"
-                        ;;
-                    *portscan*)
-                        MITRE_ID="T1046"
-                        MITRE_NAME="Network Service Discovery"
-                        ;;
-                    *scanner*|*bot*|*mapper*|*enum*)
-                        MITRE_ID="T1595"
-                        MITRE_NAME="Active Scanning"
-                        ;;
-                    *flood*|*dos*)
-                        MITRE_ID="T1498.001"
-                        MITRE_NAME="Direct Network Flood"
-                        ;;
-                    *wireguard*|*openvpn*)
-                        MITRE_ID="T1136"
-                        MITRE_NAME="External Remote Services"
-                        ;;
-                    *ssh*|*auth*|*telnet*|*ftp*|*mail*|*postfix*|*dovecot*|*mysql*|*mariadb*|*redis*|*rabbitmq*|*zabbix*|*grafana*|*vaultwarden*|*sso*|*odoo*|*prestashop*|*atlassian*|*jenkins*|*gitlab*|*proxmox*|*cockpit*|*nextcloud*)
-                        MITRE_ID="T1110"
-                        MITRE_NAME="Brute Force / Password Guessing"
-                        ;;
-                    *recidive*)
-                        MITRE_ID="T1133"
-                        MITRE_NAME="External Remote Services / Repeat Offender"
-                        ;;
+                    *webshell*) MITRE_ID="T1505.003"; MITRE_NAME="Server Software Component: Web Shell" ;;
+                    *revshell*|*rce*) MITRE_ID="T1059"; MITRE_NAME="Command and Scripting Interpreter" ;;
+                    *sqli*|*xss*|*lfi*|*ssti*|*jndi*|*haproxy*) MITRE_ID="T1190"; MITRE_NAME="Exploit Public-Facing Application" ;;
+                    *privesc*|*auditd*) MITRE_ID="T1068"; MITRE_NAME="Exploitation for Privilege Escalation" ;;
+                    *secretshunter*|*hunter*|*ssrf*|*idor*) MITRE_ID="T1552"; MITRE_NAME="Unsecured Credentials / Cloud Discovery" ;;
+                    *proxy-abuse*|*squid*) MITRE_ID="T1090"; MITRE_NAME="Connection Proxy" ;;
+                    *portscan*) MITRE_ID="T1046"; MITRE_NAME="Network Service Discovery" ;;
+                    *scanner*|*bot*|*mapper*|*enum*) MITRE_ID="T1595"; MITRE_NAME="Active Scanning" ;;
+                    *flood*|*dos*) MITRE_ID="T1498.001"; MITRE_NAME="Direct Network Flood" ;;
+                    *wireguard*|*openvpn*) MITRE_ID="T1136"; MITRE_NAME="External Remote Services" ;;
+                    *ssh*|*auth*|*telnet*|*ftp*|*mail*|*postfix*|*dovecot*|*mysql*|*mariadb*|*redis*|*rabbitmq*|*zabbix*|*grafana*|*vaultwarden*|*sso*|*odoo*|*prestashop*|*atlassian*|*jenkins*|*gitlab*|*proxmox*|*cockpit*|*nextcloud*) MITRE_ID="T1110"; MITRE_NAME="Brute Force / Password Guessing" ;;
+                    *recidive*) MITRE_ID="T1133"; MITRE_NAME="External Remote Services / Repeat Offender" ;;
                 esac
                 MITRE_PAYLOAD="${MITRE_ID}: ${MITRE_NAME}"
 
-                # UPDATE: Inject the MITRE argument into the Jails JSON array
                 JAILS_JSON=$(echo "$JAILS_JSON" | jq --arg n "$JAIL" --argjson c "$BANNED_COUNT" --arg ttp "$MITRE_PAYLOAD" '. + [{"name": $n, "count": $c, "mitre": $ttp}]')
                 
                 # --- RISK RADAR CALCULATION ---
@@ -5438,11 +5348,9 @@ if command -v fail2ban-client >/dev/null && timeout 2 fail2ban-client ping >/dev
                 elif [[ "$JAIL" =~ (flood) ]]; then R_DOS=$((R_DOS + BANNED_COUNT))
                 else R_ABU=$((R_ABU + BANNED_COUNT)); fi
                 
-                # FIX: Bulletproof extraction of Banned IP list regardless of formatting or line breaks
                 BANNED_IPS=$(echo "$STATUS_OUT" | grep -i 'Banned IP list:' | head -n 1 | sed 's/.*Banned IP list://I' | tr -d ',' | tr -s ' \t' '\n' | grep -vE '^\s*$' | tail -n 50 || true)
                 for IP in $BANNED_IPS; do
                     if [[ -n "$IP" ]]; then
-                        # --- 1. DYNAMIC PAYLOAD SCRAPING (Executed First for Fallback Access) ---
                         L7_PAYLOAD=""
                         if [[ "$JAIL" =~ (recidive) ]]; then
                             L7_PAYLOAD="Repeat Offender (Recidive Module)"
@@ -5450,40 +5358,14 @@ if command -v fail2ban-client >/dev/null && timeout 2 fail2ban-client ping >/dev
                             L7_PAYLOAD=$(timeout 1 grep -h -F "$IP" /var/log/kern-firewall.log /var/log/kern.log /var/log/messages /var/log/syslog /var/log/nginx/access.log /var/log/nginx/error.log /var/log/apache2/access.log /var/log/apache2/error.log /var/log/httpd/access_log /var/log/httpd/error_log /var/log/auth-syswarden.log /var/log/secure /var/log/auth.log /var/log/maillog /var/log/mail.log /var/log/daemon.log /var/log/audit/audit.log 2>/dev/null | grep -vE '(syswarden_reporter|fail2ban-server)' | tail -n 1 || true)
                         fi
                         
-                        # Secure Whitespace Trimming
                         L7_PAYLOAD=$(echo "$L7_PAYLOAD" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' || true)
-                        [[ -z "$L7_PAYLOAD" ]] && L7_PAYLOAD="Log rotated or payload obscured"
-
-                        # --- 2. FAIL2BAN LOG TIMESTAMP DETECTION ---
-                        # Uses explicit word boundaries (\b) to avoid matching IPs with identical prefixes
-                        TS=$(timeout 1 grep -hE "\[$JAIL\] (Ban|Restore[d]? [Bb]an) $IP\b" /var/log/fail2ban.log 2>/dev/null | tail -n 1 | awk '{print $1" "$2}' | cut -d',' -f1 | cut -d'.' -f1 || true)
                         
-                        # Fallback to older rotated log if current log doesn't hold the record
-                        if [[ -z "$TS" ]]; then
-                            TS=$(timeout 1 grep -hE "\[$JAIL\] (Ban|Restore[d]? [Bb]an) $IP\b" /var/log/fail2ban.log.1 2>/dev/null | tail -n 1 | awk '{print $1" "$2}' | cut -d',' -f1 | cut -d'.' -f1 || true)
+                        # --- DEVSECOPS FIX: SILENT DROP OF ORPHANED IPS ---
+                        # If no logs exist (log rotated or flushed), we do NOT inject the IP into the JSON registry.
+                        # This prevents UI pollution and maintains a high Signal-to-Noise Ratio.
+                        if [[ -n "$L7_PAYLOAD" ]]; then
+                            BANNED_IPS_JSON=$(echo "$BANNED_IPS_JSON" | jq --arg ip "$IP" --arg j "$JAIL" --arg p "$L7_PAYLOAD" --arg ttp "$MITRE_PAYLOAD" '. + [{"ip": $ip, "jail": $j, "payload": $p, "mitre": $ttp}]')
                         fi
-
-                        # --- 3. SMART TIMESTAMP FALLBACK (Payload Analysis) ---
-                        # If Fail2ban logs have rotated but the IP is still actively banned, extract exact timestamp from L7 Payload
-                        if [[ -z "$TS" && "$L7_PAYLOAD" != "Log rotated or payload obscured" && "$L7_PAYLOAD" != "Repeat Offender (Recidive Module)" ]]; then
-                            if echo "$L7_PAYLOAD" | grep -qE '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}'; then
-                                # Kernel ISO format (e.g., 2026-04-22T10:54:18)
-                                TS=$(echo "$L7_PAYLOAD" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}' | head -n 1 | tr 'T' ' ')
-                            elif echo "$L7_PAYLOAD" | grep -qE '[0-9]{2}/[A-Za-z]{3}/[0-9]{4}:[0-9]{2}:[0-9]{2}:[0-9]{2}'; then
-                                # Nginx format (e.g., 22/Apr/2026:10:46:38)
-                                TS=$(echo "$L7_PAYLOAD" | grep -oE '[0-9]{2}/[A-Za-z]{3}/[0-9]{4}:[0-9]{2}:[0-9]{2}:[0-9]{2}' | head -n 1 | sed 's/:/ /')
-                            elif echo "$L7_PAYLOAD" | grep -qE '[A-Z][a-z]{2}\s+[0-9]+\s+[0-9]{2}:[0-9]{2}:[0-9]{2}'; then
-                                # Traditional Syslog format (e.g., Apr 22 10:54:18)
-                                TS_SYS=$(echo "$L7_PAYLOAD" | grep -oE '[A-Z][a-z]{2}\s+[0-9]+\s+[0-9]{2}:[0-9]{2}:[0-9]{2}' | head -n 1)
-                                TS="$(date +%Y)-$TS_SYS"
-                            fi
-                        fi
-                        
-                        # Ultimate UI Fallback
-                        TS=${TS:-"Log Rotated"}
-                        
-                        # Safe JSON injection via jq --arg 
-                        BANNED_IPS_JSON=$(echo "$BANNED_IPS_JSON" | jq --arg ip "$IP" --arg j "$JAIL" --arg ts "$TS" --arg p "$L7_PAYLOAD" --arg ttp "$MITRE_PAYLOAD" '. + [{"ip": $ip, "jail": $j, "timestamp": $ts, "payload": $p, "mitre": $ttp}]')
                     fi
                 done
             fi
@@ -5495,23 +5377,21 @@ fi
 TOP_ATTACKERS_JSON="[]"
 TOP_STATS=""
 
-# FIX: Extracting both IP and Jail using a robust sed regex
+# FIX BUG: Suppress "Restore Ban" matches to prevent double counting on updates/reloads
 TOP_STATS=$( { 
     cat /var/log/fail2ban.log 2>/dev/null || true
-} | grep -E "\] (Restore )?Ban " | sed -E 's/.*\[([^]]+)\].*Ban ([0-9.]+)/\2 \1/' | sort | uniq -c | sort -nr | head -n 10 || true )
+} | grep -E "\] Ban " | sed -E 's/.*\[([^]]+)\].*Ban ([0-9.]+)/\2 \1/' | sort | uniq -c | sort -nr | head -n 10 || true )
 
 if [[ -n "$TOP_STATS" ]]; then
     while IFS=" " read -r count ip jail; do
         if [[ -n "$ip" && -n "$count" ]]; then
             PORT="Unknown"
             
-            # 1. Dynamically extract the MOST FREQUENT Destination Port (DPT) from raw system logs
             EXACT_PORT=$(timeout 2 grep -h -F "$ip" /var/log/kern-firewall.log /var/log/kern.log /var/log/syslog /var/log/messages 2>/dev/null | grep -oE 'DPT=[0-9]+' | cut -d= -f2 | sort | uniq -c | sort -nr | awk 'NR==1 {print $2}' || true)
             
             if [[ -n "$EXACT_PORT" ]]; then
                 PORT="$EXACT_PORT"
             else
-                # 2. Application layer fallback (L7 logs like Nginx do not print DPT natively)
                 case "${jail,,}" in
                     *ssh*) PORT="22" ;;
                     *http*|*web*|*nginx*|*apache*|*prestashop*|*sqli*|*xss*|*lfi*) PORT="80/443" ;;
@@ -5524,7 +5404,6 @@ if [[ -n "$TOP_STATS" ]]; then
                 esac
             fi
             
-            # Injecting exact data into the JSON payload
             TOP_ATTACKERS_JSON=$(echo "$TOP_ATTACKERS_JSON" | jq --arg ip "$ip" --arg p "$PORT" --argjson c "$count" '. + [{"ip": $ip, "port": $p, "count": $c}]')
         fi
     done <<< "$TOP_STATS"
@@ -5560,7 +5439,6 @@ jq -n \
   --arg arch "$SYS_ARCH" \
   --arg os "$SYS_OS" \
   --arg cpu "$SYS_CPU" \
-  --argjson pts "$PORTS_JSON" \
   --argjson lg "$L3_GLOBAL" \
   --argjson lgeo "$L3_GEOIP" \
   --argjson lasn "$L3_ASN" \
@@ -5575,13 +5453,12 @@ jq -n \
   --argjson rad "$RADAR_JSON" \
 '{
   timestamp: $ts,
-  system: { hostname: $host, uptime: $up, load_average: $load, ram_used_mb: $ru, ram_total_mb: $rt, disk_used_mb: $du, disk_total_mb: $dt, services: $srv, cores: $cores, arch: $arch, os: $os, cpu_model: $cpu, ports: $pts },
+  system: { hostname: $host, uptime: $up, load_average: $load, ram_used_mb: $ru, ram_total_mb: $rt, disk_used_mb: $du, disk_total_mb: $dt, services: $srv, cores: $cores, arch: $arch, os: $os, cpu_model: $cpu },
   layer3: { global_blocked: $lg, geoip_blocked: $lgeo, asn_blocked: $lasn },
   layer7: { total_banned: $ltb, active_jails: $laj, jails_data: $jj, banned_ips: $bip, top_attackers: $top, risk_radar: $rad },
   whitelist: { active_ips: $wlc, ips: $wlip }
 }' > "$TMP_FILE"
 
-# FIX: Strict ownership for Nginx web server (Universal OS handles both www-data and nginx users)
 mv -f "$TMP_FILE" "$DATA_FILE"
 chown www-data:www-data "$DATA_FILE" 2>/dev/null || chown nginx:nginx "$DATA_FILE" 2>/dev/null || true
 chmod 640 "$DATA_FILE"
@@ -5590,7 +5467,7 @@ EOF
     # 2. Make executable
     chmod +x "$BIN_PATH"
 
-    # 3. Injection into CRON tasks (Execution every minute)
+    # 3. Injection into CRON tasks
     if ! crontab -l 2>/dev/null | grep "$BIN_PATH" >/dev/null; then
         (
             crontab -l 2>/dev/null || true
@@ -5598,130 +5475,84 @@ EOF
         ) | crontab -
     fi
 
-    # 4. First immediate run to generate data.json before the UI starts
+    # 4. First immediate run
     if ! "$BIN_PATH"; then
         log "WARN" "Initial telemetry run failed, but script will continue."
     fi
 }
 
 # ==============================================================================
-# SYSWARDEN v2.50 - NGINX SECURE DASHBOARD (ENTERPRISE SAAS UI / SPA / CSP)
+# SYSWARDEN v2.51 - NGINX SECURE DASHBOARD (ENTERPRISE SAAS UI / SPA / CSP)
 # ==============================================================================
 function generate_dashboard() {
-    log "INFO" "Generating the Enterprise SaaS Nginx Dashboard (SPA/Sidebar/CSP)..."
+    log "INFO" "Generating the Enterprise SaaS Nginx Dashboard (SPA/CSP)..."
 
     local UI_DIR="/etc/syswarden/ui"
     mkdir -p "$UI_DIR"
 
-    # --- SECURITY FIX: ZERO KNOWLEDGE FOR LOCAL USERS ---
     chmod 750 /etc/syswarden
     chmod 750 "$UI_DIR"
 
-    # Nginx load only
     if id "www-data" >/dev/null 2>&1; then
         chown root:www-data /etc/syswarden "$UI_DIR"
     elif id "nginx" >/dev/null 2>&1; then
         chown root:nginx /etc/syswarden "$UI_DIR"
     fi
 
-    # 1. Generating the HTML file (Enterprise Sidebar Structure)
+    # 1. Generating the HTML file (Single Page Layout)
     cat <<'EOF' >"$UI_DIR/index.html"
 <!DOCTYPE html>
 <html lang="en" data-bs-theme="auto">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>SysWarden | Enterprise Console</title>
+    <title>SysWarden | Dashboard</title>
     
     <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
     
     <style>
-        /* --- SAAS THEME DEFINITIONS --- */
         :root[data-bs-theme="light"] {
             --sw-bg: #ffffff;
-            --sw-sidebar-bg: #ffffff;
             --sw-nav-bg: #ffffff;
             --sw-card-bg: #ffffff;
             --sw-border: #e5e7eb;
             --sw-text: #1f2937;
             --sw-text-muted: #6b7280;
-            --sw-brand-text: #111827;
             --sw-brand-icon: #2563eb;
-            --sw-sidebar-hover: #f3f4f6;
-            --sw-sidebar-active: #eff6ff;
-            --sw-sidebar-active-text: #1d4ed8;
-            --sw-chart-ddos: #27272a; /* Dark Grey/Black */
         }
         :root[data-bs-theme="dark"] {
             --sw-bg: #000000;
-            --sw-sidebar-bg: #09090b;
             --sw-nav-bg: #09090b;
             --sw-card-bg: #09090b;
             --sw-border: rgba(255, 255, 255, 0.12);
             --sw-text: #ffffff;
             --sw-text-muted: #a1a1aa;
-            --sw-brand-text: #ffffff;
             --sw-brand-icon: #3b82f6;
-            --sw-sidebar-hover: #18181b;
-            --sw-sidebar-active: #18181b;
-            --sw-sidebar-active-text: #ffffff;
-            --sw-chart-ddos: #fafafa; /* White/Light grey for contrast */
         }
 
-        /* --- APP LAYOUT (APP-LIKE FEEL) --- */
         body { 
             font-family: 'Roboto', sans-serif;
             background-color: var(--sw-bg); color: var(--sw-text);
             transition: background-color 0.3s ease, color 0.3s ease;
             -webkit-font-smoothing: antialiased;
-            overflow: hidden; 
         }
-        /* 100% Roboto */
         .font-mono { font-weight: 500; }
 
-        /* --- SIDEBAR COMPONENT --- */
-        .sidebar {
-            width: 280px; min-width: 280px; flex-shrink: 0; height: 100vh;
-            background-color: var(--sw-sidebar-bg); border-right: 1px solid var(--sw-border);
-            display: flex; flex-direction: column; transition: all 0.3s ease; z-index: 1040;
-        }
-        .sidebar.collapsed { width: 80px; min-width: 80px; }
-        .sidebar.collapsed .hide-collapsed { display: none !important; }
-        .sidebar.collapsed .nav-item-sw { justify-content: center; padding: 12px 0; }
-        .sidebar.collapsed .nav-item-sw svg { margin: 0; }
+        .main-wrapper { flex-grow: 1; overflow-y: auto; overflow-x: hidden; scroll-behavior: smooth; height: calc(100vh - 65px); }
 
-        .nav-item-sw {
-            display: flex; align-items: center; gap: 12px; padding: 10px 16px;
-            color: var(--sw-text-muted); text-decoration: none; border-radius: 8px;
-            font-weight: 500; font-size: 0.95rem; transition: all 0.2s ease; margin-bottom: 4px;
-        }
-        .nav-item-sw:hover { background-color: var(--sw-sidebar-hover); color: var(--sw-text); }
-        .nav-item-sw.active { background-color: var(--sw-sidebar-active); color: var(--sw-sidebar-active-text); font-weight: 600; }
-        .nav-item-sw svg { opacity: 0.7; }
-        .nav-item-sw.active svg { opacity: 1; }
-
-        /* --- MAIN VIEWPORT & SPA ROUTING --- */
-        .main-content { display: flex; flex-direction: column; flex-grow: 1; height: 100vh; overflow: hidden; }
-        .main-wrapper { flex-grow: 1; overflow-y: auto; overflow-x: hidden; scroll-behavior: smooth; }
-        .view-section { display: none; opacity: 0; transition: opacity 0.3s ease-in-out; }
-        .view-section.active { display: block; opacity: 1; }
-
-        /* --- NAVBAR --- */
         .top-navbar {
-            height: 65px; min-height: 65px; flex-shrink: 0;
+            height: 65px; min-height: 65px;
             background-color: var(--sw-nav-bg); border-bottom: 1px solid var(--sw-border);
             display: flex; align-items: center; justify-content: space-between; padding: 0 1.5rem;
         }
         .theme-toggle-btn { background: transparent; border: none; color: var(--sw-text); cursor: pointer; display: flex; align-items: center; justify-content: center; width: 36px; height: 36px; border-radius: 50%; transition: background 0.2s; }
-        .theme-toggle-btn:hover { background: var(--sw-sidebar-hover); }
+        .theme-toggle-btn:hover { background: var(--sw-border); }
 
-        /* --- CARDS & UI COMPONENTS --- */
         .card { background-color: var(--sw-card-bg); border: 1px solid var(--sw-border); border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
         .card-header { border-bottom: 1px solid var(--sw-border); font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase; font-size: 0.80rem; color: var(--sw-text-muted); }
         
-        /* Colored Left Borders for KPIs */
         .card-l3 { border-left: 4px solid var(--sw-brand-icon) !important; }
         .card-l7 { border-left: 4px solid #ef4444 !important; }
         .card-wl { border-left: 4px solid #10b981 !important; }
@@ -5729,892 +5560,510 @@ function generate_dashboard() {
         .stat-value { font-size: clamp(1.2rem, 1.6vw, 1.6rem); font-weight: 800; line-height: 1.1; letter-spacing: -0.5px; }
         .stat-label { font-size: 0.80rem; text-transform: uppercase; letter-spacing: 1px; color: var(--sw-text-muted); font-weight: 700; }
         .table-container { max-height: 350px; overflow-y: auto; }
-        .chart-wrapper { position: relative; height: 320px; width: 100%; }
 
-        /* Scrollbars */
         ::-webkit-scrollbar { width: 6px; height: 6px; }
         ::-webkit-scrollbar-track { background: transparent; }
         ::-webkit-scrollbar-thumb { background: var(--sw-border); border-radius: 10px; }
         ::-webkit-scrollbar-corner { background: transparent; }
         
-        /* Overrides */
         .table { --bs-table-bg: transparent !important; margin-bottom: 0 !important; }
         .table > :not(caption) > * > * { background-color: transparent !important; border-color: var(--sw-border) !important; }
         .ip-font { font-size: 85% !important; }
-        
-        /* Mobile Adjustments */
-        @media (max-width: 991px) {
-            .sidebar { position: fixed; transform: translateX(-100%); width: 280px !important; }
-            .sidebar.show { transform: translateX(0); }
-            .sidebar.collapsed .hide-collapsed { display: block !important; } /* Reset collapse on mobile */
-            .sidebar-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 1030; }
-            .sidebar-overlay.show { display: block; }
-        }
     </style>
 </head>
-<body class="d-flex">
+<body class="d-flex flex-column" style="height: 100vh; margin: 0;">
 
-    <div class="sidebar-overlay" id="sidebarOverlay"></div>
-
-    <aside class="sidebar py-4 d-flex flex-column" id="sidebar">
-        <div class="d-flex align-items-center justify-content-center gap-2 px-3 mb-5">
-            <svg style="color: var(--sw-brand-icon);" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
-            <div class="d-flex align-items-baseline gap-2 hide-collapsed">
-                <span class="fs-5 fw-bold" style="color: var(--sw-brand-text); letter-spacing: -0.5px;">SYSWARDEN</span>
-                <span class="stat-label" style="margin-bottom: 0;">v2.50</span>
-            </div>
+    <nav class="top-navbar">
+        <div class="d-flex align-items-center gap-3">
+            <svg style="color: var(--sw-brand-icon);" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
+            <h5 class="mb-0 fw-bold d-none d-md-block text-uppercase" style="letter-spacing: 0.5px; font-size: 1.1rem; color: var(--sw-text);">SYSWARDEN v2.51</h5>
         </div>
-
-        <nav class="flex-grow-1 px-3">
-            <div class="text-uppercase small text-muted mb-2 hide-collapsed" style="font-size: 0.7rem; font-weight: 700; letter-spacing: 1px;">Analytics</div>
-            <a href="#overview" class="nav-item-sw active" data-view="overview" title="Overview">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>
-                <span class="hide-collapsed">Overview</span>
-            </a>
-            <a href="#threats" class="nav-item-sw" data-view="threats" title="Threat Intel">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><circle cx="12" cy="12" r="6"></circle><circle cx="12" cy="12" r="2"></circle></svg>
-                <span class="hide-collapsed">Threat Intel</span>
-            </a>
-            <a href="#system" class="nav-item-sw" data-view="system" title="System Health">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>
-                <span class="hide-collapsed">System Health</span>
-            </a>
-        </nav>
-
-        <div class="mt-auto border-top pt-3 px-3 pb-3 hide-collapsed" style="border-color: var(--sw-border) !important;">
-            <div class="d-flex flex-column gap-2">
-                <a href="https://github.com/duggytuxy/syswarden" target="_blank" rel="noopener noreferrer" class="d-flex justify-content-between align-items-center px-3 py-2 rounded-3 text-decoration-none" style="background: var(--sw-bg); border: 1px solid var(--sw-border); color: var(--sw-text); transition: all 0.2s;">
-                    <div class="d-flex align-items-center gap-2 small fw-bold">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>
-                        Stars
-                    </div>
-                    <span id="gh-stars" class="font-mono fw-bold small">--</span>
+        
+        <div class="d-flex align-items-center gap-3 gap-md-4">
+            <div class="d-none d-md-flex align-items-center gap-4 border-end pe-4" style="border-color: var(--sw-border) !important;">
+                <a href="https://github.com/duggytuxy/syswarden" target="_blank" rel="noopener noreferrer" class="text-decoration-none small font-mono d-flex align-items-center gap-2" style="color: var(--sw-text);">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>
+                    Stars <span id="gh-stars" class="fw-bold">--</span>
                 </a>
-                <a href="https://github.com/duggytuxy/syswarden/releases/latest" target="_blank" rel="noopener noreferrer" class="d-flex justify-content-between align-items-center px-3 py-2 rounded-3 text-decoration-none" style="background: var(--sw-bg); border: 1px solid var(--sw-border); color: var(--sw-text); transition: all 0.2s;">
-                    <div class="d-flex align-items-center gap-2 small fw-bold">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline><line x1="12" y1="22.08" x2="12" y2="12"></line></svg>
-                        Release
-                    </div>
-                    <span id="gh-release" class="font-mono fw-bold text-primary small">--</span>
+                <a href="https://github.com/duggytuxy/syswarden/releases/latest" target="_blank" rel="noopener noreferrer" class="text-decoration-none small font-mono d-flex align-items-center gap-2" style="color: var(--sw-text);">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline><line x1="12" y1="22.08" x2="12" y2="12"></line></svg>
+                    Release <span id="gh-release" class="text-primary fw-bold">--</span>
                 </a>
             </div>
-        </div>
-    </aside>
 
-    <div class="main-content">
-        <nav class="top-navbar">
-            <div class="d-flex align-items-center gap-3">
-                <button class="btn btn-sm btn-link text-body p-0" id="sidebarToggle">
-                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>
-                </button>
-                <h5 class="mb-0 fw-bold d-none d-md-block text-uppercase" style="letter-spacing: 0.5px; font-size: 1rem;">Enterprise Console</h5>
+            <div class="d-flex align-items-center gap-2 px-3 py-1 rounded-pill" style="background: var(--sw-bg); border: 1px solid var(--sw-border);">
+                <div id="status-spinner" class="spinner-grow spinner-grow-sm text-success" style="width: 8px; height: 8px;" role="status"></div>
+                <span id="sys-hostname" class="text-truncate fw-bold small" style="max-width: 150px;">Node</span>
+                <span id="sys-ip" class="text-muted font-mono small d-none d-lg-block"></span>
             </div>
             
-            <div class="d-flex align-items-center gap-3 gap-md-4">
-                <div class="d-flex align-items-center gap-2 px-3 py-1 rounded-pill" style="background: var(--sw-bg); border: 1px solid var(--sw-border);">
-                    <div id="status-spinner" class="spinner-grow spinner-grow-sm text-success" style="width: 8px; height: 8px;" role="status"></div>
-                    <span id="sys-hostname" class="text-truncate fw-bold small" style="max-width: 150px;">Node</span>
-                    <span id="sys-ip" class="text-muted font-mono small d-none d-lg-block"></span>
+            <button class="theme-toggle-btn" id="theme-toggle-btn" title="Toggle Theme">
+                <svg id="icon-sun" class="d-none" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>
+                <svg id="icon-moon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
+            </button>
+        </div>
+    </nav>
+
+    <main class="main-wrapper">
+        <div class="container-fluid px-xl-5 px-4 py-4">
+            
+            <div class="card mb-4">
+                <div class="card-body py-3 px-4 d-flex flex-column gap-2 justify-content-center" style="min-height: 70px;">
+                    <div class="d-flex flex-wrap gap-4 align-items-center border-bottom pb-2" style="border-color: var(--sw-border) !important;">
+                        <div class="font-mono small"><span class="text-muted">Cores:</span> <span id="hw-cores" class="ms-1">--</span></div>
+                        <div class="font-mono small"><span class="text-muted">Arch:</span> <span id="hw-arch" class="ms-1">--</span></div>
+                        <div class="font-mono small"><span class="text-muted">OS:</span> <span id="hw-os" class="ms-1">--</span></div>
+                        <div class="font-mono small d-flex align-items-center"><span class="text-muted me-1">CPU:</span> <span class="text-truncate" style="max-width: 250px;" id="hw-cpu" title="CPU Model">--</span></div>
+                        <div class="font-mono small"><span class="text-muted">Last update:</span> <span id="hw-update" class="ms-1">--</span></div>
+                    </div>
+                    <div class="d-flex flex-wrap gap-4 align-items-center border-bottom pb-2 pt-1" style="border-color: var(--sw-border) !important;">
+                        <div class="font-mono small"><span class="text-muted">Uptime:</span> <span id="sys-uptime" class="ms-1 text-primary">--</span></div>
+                        <div class="font-mono small"><span class="text-muted">Load Avg (1,5,15m):</span> <span id="sys-load" class="ms-1">--</span></div>
+                        <div class="font-mono small"><span class="text-muted">RAM:</span> <span id="sys-ram" class="ms-1">-- MB</span></div>
+                        <div class="font-mono small"><span class="text-muted">Storage (Root):</span> <span id="sys-disk" class="ms-1">-- GB</span></div>
+                    </div>
+                    <div class="d-flex flex-wrap gap-3 align-items-center pt-1 font-mono small" id="sys-services-list">
+                        </div>
                 </div>
-                
-                <button class="theme-toggle-btn" id="theme-toggle-btn" title="Toggle Theme">
-                    <svg id="icon-sun" class="d-none" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>
-                    <svg id="icon-moon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
-                </button>
             </div>
-        </nav>
-
-        <main class="main-wrapper">
-            <div class="container-fluid px-xl-5 px-4 py-4">
-                
-                <div id="view-overview" class="view-section active">
-                    <h4 class="mb-4 fw-bold">Overview</h4>
-                    
-                    <div class="row g-4 mb-4">
-                        <div class="col-xxl-4 col-lg-6">
-                            <div class="card card-l3 h-100">
-                                <div class="card-body p-4">
-                                    <div class="stat-label mb-3">L3 Kernel Blocks (Global)</div>
-                                    <div class="stat-value text-primary font-mono mb-3" id="l3-global">0</div>
-                                    <div class="d-flex justify-content-between border-top pt-3 font-mono small text-muted" style="border-color: var(--sw-border) !important;">
-                                        <span>GeoIP: <strong class="text-body" id="l3-geoip">0</strong></span>
-                                        <span>ASN: <strong class="text-body" id="l3-asn">0</strong></span>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div class="col-xxl-4 col-lg-6">
-                            <div class="card card-l7 h-100">
-                                <div class="card-body p-4">
-                                    <div class="stat-label mb-3">L7 Active Bans (Fail2ban)</div>
-                                    <div class="stat-value text-danger font-mono mb-3" id="l7-banned">0</div>
-                                    <div class="d-flex justify-content-between border-top pt-3 font-mono small text-muted" style="border-color: var(--sw-border) !important;">
-                                        <span>Active Guard Jails:</span>
-                                        <strong class="text-body" id="l7-jails">0</strong>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div class="col-xxl-4 col-lg-12">
-                            <div class="card card-wl h-100">
-                                <div class="card-body p-4">
-                                    <div class="d-flex justify-content-between align-items-start mb-3">
-                                        <div class="stat-label">Trusted Hosts (Whitelist)</div>
-                                        <span class="badge bg-success bg-opacity-10 text-success rounded-pill font-mono" id="wl-count">0</span>
-                                    </div>
-                                    <div class="table-container pe-2 font-mono small text-success" style="max-height: 70px;">
-                                        <ul class="list-unstyled mb-0" id="whitelist-ips-list"></ul>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="row g-4 mb-4">
-                        <div class="col-xl-8">
-                            <div class="card h-100">
-                                <div class="card-header bg-transparent pt-4 pb-0 px-4 d-flex align-items-center gap-2">
-                                    L7 Threat Telemetry (Live Timeline)
-                                </div>
-                                <div class="card-body p-4">
-                                    <div class="chart-wrapper">
-                                        <canvas id="threatChart"></canvas>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="col-xl-4">
-                            <div class="card h-100">
-                                <div class="card-header bg-transparent pt-4 pb-0 px-4 d-flex align-items-center gap-2">
-                                    Global Risk Vectors
-                                </div>
-                                <div class="card-body p-4 d-flex align-items-center justify-content-center">
-                                    <div style="position: relative; height: 280px; width: 100%;">
-                                        <canvas id="riskChart"></canvas>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <div class="row g-4 mb-4">
-                        <div class="col-12">
-                            <div class="card h-100">
-                                <div class="card-header bg-transparent pt-4 pb-0 px-4 d-flex align-items-center gap-2">
-                                    Filtration Efficiency (Signal vs Noise)
-                                </div>
-                                <div class="card-body p-4">
-                                    <div class="row align-items-center">
-                                        <div class="col-md-6 mb-4 mb-md-0" style="border-right: 1px solid var(--sw-border);">
-                                            <div class="d-flex justify-content-between small font-mono fw-bold mb-2">
-                                                <span class="text-muted">Automated Noise Blocked (L2/L3 Blocklists)</span>
-                                                <span id="noise-pct" class="text-success">--%</span>
-                                            </div>
-                                            <div class="progress" style="height: 10px; background-color: var(--sw-border);">
-                                                <div id="noise-bar" class="progress-bar bg-success" role="progressbar" style="width: 0%; transition: width 0.5s ease;"></div>
-                                            </div>
-                                        </div>
-                                        <div class="col-md-6 ps-md-4">
-                                            <div class="d-flex justify-content-between small font-mono fw-bold mb-2">
-                                                <span class="text-muted">Actionable Signals (L7 Fail2ban)</span>
-                                                <span id="signal-pct" class="text-danger">--%</span>
-                                            </div>
-                                            <div class="progress" style="height: 10px; background-color: var(--sw-border);">
-                                                <div id="signal-bar" class="progress-bar bg-danger" role="progressbar" style="width: 0%; transition: width 0.5s ease;"></div>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
+            
+            <div class="row g-4 mb-4">
+                <div class="col-xxl-4 col-lg-6">
+                    <div class="card card-l3 h-100">
+                        <div class="card-body p-4">
+                            <div class="stat-label mb-3">L3 Kernel Blocks (Global)</div>
+                            <div class="stat-value text-primary font-mono mb-3" id="l3-global">0</div>
+                            <div class="d-flex justify-content-between border-top pt-3 font-mono small text-muted" style="border-color: var(--sw-border) !important;">
+                                <span>GeoIP: <strong class="text-body" id="l3-geoip">0</strong></span>
+                                <span>ASN: <strong class="text-body" id="l3-asn">0</strong></span>
                             </div>
                         </div>
                     </div>
                 </div>
 
-                <div id="view-threats" class="view-section">
-                    <h4 class="mb-4 fw-bold">Threat Intelligence</h4>
-                    
-                    <div class="row g-4">
-                        <div class="col-xl-6">
-                            <div class="card h-100">
-                                <div class="card-header bg-transparent pt-4 pb-3 px-4 border-bottom-0">Top Attackers (OSINT History)</div>
-                                <div class="card-body p-0">
-                                    <div class="table-responsive table-container">
-                                        <table class="table table-sm mb-0 small">
-                                            <thead style="position: sticky; top: 0; background: var(--sw-card-bg); z-index: 2; border: none;">
-                                                <tr>
-                                                    <th class="text-muted small fw-normal pb-2 ps-4">IP ADDRESS</th>
-                                                    <th class="text-muted small fw-normal pb-2">PORT</th>
-                                                    <th class="text-end text-muted small fw-normal pb-2 pe-4">HITS</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody id="top-ips-list"></tbody>
-                                        </table>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                        
-                        <div class="col-xl-6">
-                            <div class="card h-100">
-                                <div class="card-header bg-transparent pt-4 pb-3 px-4 border-bottom-0">Jails Load Distribution</div>
-                                <div class="card-body p-0">
-                                    <div class="table-responsive table-container" style="max-height: 350px; overflow-y: auto;">
-                                        <table class="table table-sm mb-0 small">
-                                            <thead style="position: sticky; top: 0; background: var(--sw-card-bg); z-index: 2; border: none;">
-                                                <tr>
-                                                    <th class="text-muted small fw-normal pb-2 ps-4">TARGET JAIL</th>
-                                                    <th class="text-muted small fw-normal pb-2">MITRE ATT&CK</th>
-                                                    <th class="text-end text-muted small fw-normal pb-2 pe-4">LOAD</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody id="top-jails-list"></tbody>
-                                        </table>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div class="col-12">
-                            <div class="card">
-                                <div class="card-header bg-transparent pt-4 pb-3 px-4 border-bottom-0">L7 Banned IP Registry (Live Jail Allocations)</div>
-                                <div class="card-body p-0">
-                                    <div class="table-responsive table-container" style="max-height: 450px;">
-                                        <table class="table table-sm mb-0 small">
-                                            <thead style="position: sticky; top: 0; background: var(--sw-card-bg); z-index: 2; border: none;">
-                                                <tr>
-                                                    <th class="text-muted small fw-normal pb-2 ps-4" style="min-width: 150px;">IP ADDRESS</th>
-                                                    <th class="text-muted small fw-normal pb-2" style="min-width: 150px;">TARGET JAIL</th>
-                                                    <th class="text-muted small fw-normal pb-2 ps-3" style="min-width: 200px;">MITRE ATT&CK</th>
-                                                    <th class="text-muted small fw-normal pb-2 ps-4" style="min-width: 180px;">TIMESTAMP</th>
-                                                    <th class="text-muted small fw-normal pb-2 ps-4 pe-4" style="min-width: 250px;">TRIGGER</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody id="banned-ips-list"></tbody>
-                                        </table>
-                                    </div>
-                                </div>
+                <div class="col-xxl-4 col-lg-6">
+                    <div class="card card-l7 h-100">
+                        <div class="card-body p-4">
+                            <div class="stat-label mb-3">L7 Active Bans (Fail2ban)</div>
+                            <div class="stat-value text-danger font-mono mb-3" id="l7-banned">0</div>
+                            <div class="d-flex justify-content-between border-top pt-3 font-mono small text-muted" style="border-color: var(--sw-border) !important;">
+                                <span>Active Guard Jails:</span>
+                                <strong class="text-body" id="l7-jails">0</strong>
                             </div>
                         </div>
                     </div>
                 </div>
 
-                <div id="view-system" class="view-section">
-                    <h4 class="mb-4 fw-bold">System Health</h4>
-                    
-                    <div class="card mb-4">
-                        <div class="card-body py-3 px-4 d-flex flex-wrap align-items-center justify-content-between" style="min-height: 60px;">
-                            <div class="font-mono small mb-2 mb-md-0"><span class="text-muted">Cores (CPU):</span> <span class="text-body fw-normal ms-1" id="hw-cores">--</span></div>
-                            <div class="font-mono small mb-2 mb-md-0"><span class="text-muted">Arch:</span> <span class="text-body fw-normal ms-1" id="hw-arch">--</span></div>
-                            <div class="font-mono small mb-2 mb-md-0"><span class="text-muted">Operating System:</span> <span class="text-body fw-normal ms-1" id="hw-os">--</span></div>
-                            <div class="font-mono small mb-2 mb-md-0 d-flex align-items-center"><span class="text-muted me-1">CPU:</span> <span class="text-body fw-normal text-truncate" style="max-width: 250px;" id="hw-cpu" title="CPU Model">--</span></div>
-                            <div class="font-mono small"><span class="text-muted">Last update:</span> <span class="text-body fw-normal ms-1" id="hw-update">--</span></div>
-                        </div>
-                    </div>
-                    
-                    <div class="row g-4">
-                        <div class="col-xl-6">
-                            <div class="card h-100">
-                                <div class="card-body p-4">
-                                    <div class="d-flex justify-content-between align-items-start mb-4">
-                                        <div class="stat-label">Node Status</div>
-                                        <span class="badge bg-secondary rounded-pill font-mono" id="sys-uptime">--</span>
-                                    </div>
-                                    <div class="mb-4 border-bottom pb-4" style="border-color: var(--sw-border) !important;">
-                                        <div class="text-muted small text-uppercase fw-bold mb-2">CPU Load Average (1, 5, 15m)</div>
-                                        <div class="stat-value font-mono" id="sys-load">--</div>
-                                    </div>
-                                    <div>
-                                        <div class="d-flex justify-content-between small text-muted mb-2 font-mono fw-bold">
-                                            <span>RAM Utilization</span>
-                                            <span id="sys-ram">-- MB</span>
-                                        </div>
-                                        <div class="progress" style="height: 8px; background-color: var(--sw-border);" id="ram-progress-container">
-                                            <div class="progress-bar bg-primary" role="progressbar" id="ram-progress" style="width: 0%;"></div>
-                                        </div>
-                                    </div>
-                                    <div class="mt-4">
-                                        <div class="d-flex justify-content-between small text-muted mb-2 font-mono fw-bold">
-                                            <span>Storage Utilization (Root)</span>
-                                            <span id="sys-disk">-- GB</span>
-                                        </div>
-                                        <div class="progress" style="height: 8px; background-color: var(--sw-border);" id="disk-progress-container">
-                                            <div class="progress-bar bg-info" role="progressbar" id="disk-progress" style="width: 0%;"></div>
-                                        </div>
-                                    </div>
-                                </div>
+                <div class="col-xxl-4 col-lg-12">
+                    <div class="card card-wl h-100">
+                        <div class="card-body p-4">
+                            <div class="d-flex justify-content-between align-items-start mb-3">
+                                <div class="stat-label">Trusted Hosts (Whitelist)</div>
+                                <span class="badge bg-success bg-opacity-10 text-success rounded-pill font-mono" id="wl-count">0</span>
                             </div>
-                        </div>
-                        
-                        <div class="col-xl-6">
-                            <div class="card h-100">
-                                <div class="card-header bg-transparent pt-4 pb-3 px-4 text-uppercase fw-bold small text-muted">
-                                    Core Processes
-                                </div>
-                                <div class="card-body px-0 pt-0">
-                                    <table class="table table-sm mb-0 small">
-                                        <tbody id="sys-services-list"></tbody>
-                                    </table>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div class="col-12">
-                            <div class="card">
-                                <div class="card-header bg-transparent pt-4 pb-3 px-4 border-bottom-0">Network Ports</div>
-                                <div class="card-body p-0">
-                                    <div class="table-responsive table-container" style="max-height: 450px;">
-                                        <table class="table table-sm mb-0 small">
-                                            <thead style="position: sticky; top: 0; background: var(--sw-card-bg); z-index: 2; border: none;">
-                                                <tr>
-                                                    <th class="text-muted small fw-normal pb-2 ps-4">INTERFACE</th>
-                                                    <th class="text-muted small fw-normal pb-2">LOCAL IP ADDRESS</th>
-                                                    <th class="text-muted small fw-normal pb-2">PROCESSES</th>
-                                                    <th class="text-muted small fw-normal pb-2">STATE</th>
-                                                    <th class="text-muted small fw-normal pb-2">LOCAL PORT</th>
-                                                    <th class="text-muted small fw-normal pb-2 pe-4">PROTOCOL</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody id="network-ports-list"></tbody>
-                                        </table>
-                                    </div>
-                                </div>
+                            <div class="table-container pe-2 font-mono small text-success" style="max-height: 70px;">
+                                <ul class="list-unstyled mb-0" id="whitelist-ips-list"></ul>
                             </div>
                         </div>
                     </div>
                 </div>
-
             </div>
-        </main>
-    </div>
+
+            <div class="row g-4 mb-4">
+                <div class="col-xl-4">
+                    <div class="card h-100">
+                        <div class="card-header bg-transparent pt-4 pb-0 px-4 d-flex align-items-center gap-2">Global Risk Vectors</div>
+                        <div class="card-body p-4 d-flex align-items-center justify-content-center">
+                            <div style="position: relative; height: 280px; width: 100%;">
+                                <canvas id="riskChart"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="col-xl-8">
+                    <div class="card h-100">
+                        <div class="card-header bg-transparent pt-4 pb-3 px-4 border-bottom-0">Top Attackers (OSINT History)</div>
+                        <div class="card-body p-0">
+                            <div class="table-responsive table-container" style="max-height: 310px;">
+                                <table class="table table-sm mb-0 small">
+                                    <thead style="position: sticky; top: 0; background: var(--sw-card-bg); z-index: 2; border: none;">
+                                        <tr>
+                                            <th class="text-muted small fw-normal pb-2 ps-4">IP ADDRESS</th>
+                                            <th class="text-muted small fw-normal pb-2">PORT</th>
+                                            <th class="text-end text-muted small fw-normal pb-2 pe-4">HITS</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="top-ips-list"></tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="row g-4 mb-4">
+                <div class="col-xl-4">
+                    <div class="card h-100">
+                        <div class="card-header bg-transparent pt-4 pb-3 px-4 border-bottom-0">Jails Load Distribution</div>
+                        <div class="card-body p-0">
+                            <div class="table-responsive table-container" style="max-height: 450px;">
+                                <table class="table table-sm mb-0 small">
+                                    <thead style="position: sticky; top: 0; background: var(--sw-card-bg); z-index: 2; border: none;">
+                                        <tr>
+                                            <th class="text-muted small fw-normal pb-2 ps-4">TARGET JAIL</th>
+                                            <th class="text-muted small fw-normal pb-2">MITRE ATT&CK</th>
+                                            <th class="text-end text-muted small fw-normal pb-2 pe-4">LOAD</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="top-jails-list"></tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="col-xl-8">
+                    <div class="card h-100">
+                        <div class="card-header bg-transparent pt-4 pb-3 px-4 border-bottom-0">L7 Banned IP Registry (Live Jail Allocations)</div>
+                        <div class="card-body p-0">
+                            <div class="table-responsive table-container" style="max-height: 450px;">
+                                <table class="table table-sm mb-0 small">
+                                    <thead style="position: sticky; top: 0; background: var(--sw-card-bg); z-index: 2; border: none;">
+                                        <tr>
+                                            <th class="text-muted small fw-normal pb-2 ps-4" style="min-width: 150px;">IP ADDRESS</th>
+                                            <th class="text-muted small fw-normal pb-2" style="min-width: 150px;">TARGET JAIL</th>
+                                            <th class="text-muted small fw-normal pb-2 ps-3" style="min-width: 200px;">MITRE ATT&CK</th>
+                                            <th class="text-muted small fw-normal pb-2 ps-4 pe-4" style="min-width: 250px;">TRIGGER PAYLOAD</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="banned-ips-list"></tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="row g-4 mb-4">
+                <div class="col-12">
+                    <div class="card h-100">
+                        <div class="card-header bg-transparent pt-4 pb-0 px-4 d-flex align-items-center gap-2">
+                            Filtration Efficiency (Signal vs Noise)
+                        </div>
+                        <div class="card-body p-4">
+                            <div class="row align-items-center">
+                                <div class="col-md-6 mb-4 mb-md-0" style="border-right: 1px solid var(--sw-border);">
+                                    <div class="d-flex justify-content-between small font-mono fw-bold mb-2">
+                                        <span class="text-muted">Automated Noise Blocked (L2/L3 Blocklists)</span>
+                                        <span id="noise-pct" class="text-success">--%</span>
+                                    </div>
+                                    <div class="progress" style="height: 10px; background-color: var(--sw-border);">
+                                        <div id="noise-bar" class="progress-bar bg-success" role="progressbar" style="width: 0%; transition: width 0.5s ease;"></div>
+                                    </div>
+                                </div>
+                                <div class="col-md-6 ps-md-4">
+                                    <div class="d-flex justify-content-between small font-mono fw-bold mb-2">
+                                        <span class="text-muted">Actionable Signals (L7 Fail2ban)</span>
+                                        <span id="signal-pct" class="text-danger">--%</span>
+                                    </div>
+                                    <div class="progress" style="height: 10px; background-color: var(--sw-border);">
+                                        <div id="signal-bar" class="progress-bar bg-danger" role="progressbar" style="width: 0%; transition: width 0.5s ease;"></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+    </main>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-    <script src="app.js"></script>
+    <script>
+    let riskChart = null;
+
+    document.addEventListener('DOMContentLoaded', () => {
+        
+        // --- THEME ENGINE (ICONS) ---
+        const themeBtn = document.getElementById('theme-toggle-btn');
+        const iconSun = document.getElementById('icon-sun');
+        const iconMoon = document.getElementById('icon-moon');
+        
+        const applyThemeState = (isDark) => {
+            document.documentElement.setAttribute('data-bs-theme', isDark ? 'dark' : 'light');
+            if(isDark) {
+                iconMoon.classList.add('d-none');
+                iconSun.classList.remove('d-none');
+            } else {
+                iconSun.classList.add('d-none');
+                iconMoon.classList.remove('d-none');
+            }
+            updateChartTheme(isDark ? 'dark' : 'light');
+        };
+
+        const toggleTheme = () => {
+            const currentTheme = document.documentElement.getAttribute('data-bs-theme');
+            const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+            localStorage.setItem('syswarden-theme', newTheme);
+            applyThemeState(newTheme === 'dark');
+        };
+
+        themeBtn.addEventListener('click', toggleTheme);
+
+        const savedTheme = localStorage.getItem('syswarden-theme');
+        if (savedTheme) {
+            applyThemeState(savedTheme === 'dark');
+        } else {
+            applyThemeState(window.matchMedia('(prefers-color-scheme: dark)').matches);
+        }
+
+        // --- CHART.JS INITIALIZATION (DOUGHNUT ONLY) ---
+        try {
+            const ctxRadar = document.getElementById('riskChart').getContext('2d');
+            riskChart = new Chart(ctxRadar, {
+                type: 'doughnut',
+                data: {
+                    labels: ['Exploits', 'Brute-Force', 'Recon', 'DDoS', 'Abuse/Spam'],
+                    datasets: [{
+                        data: [0, 0, 0, 0, 0],
+                        backgroundColor: [
+                            '#ef4444', // Red
+                            '#eab308', // Yellow
+                            '#3b82f6', // Blue
+                            'var(--sw-chart-ddos)', // Black/Grey depending on theme
+                            '#f97316'  // Orange
+                        ],
+                        borderWidth: 2,
+                        borderColor: 'var(--sw-card-bg)'
+                    }]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: false, cutout: '65%',
+                    plugins: { 
+                        legend: { position: 'bottom', labels: { padding: 20, font: { family: 'Roboto', size: 12, weight: '500' } } },
+                        tooltip: { padding: 10, cornerRadius: 8, bodyFont: { family: 'monospace', size: 13, weight: 'bold' } }
+                    }
+                }
+            });
+        } catch (e) { console.warn("Chart.js init failed:", e); }
+
+        updateChartTheme(document.documentElement.getAttribute('data-bs-theme'));
+
+        function updateChartTheme(theme) {
+            if(riskChart) {
+                const isDark = theme === 'dark';
+                riskChart.data.datasets[0].borderColor = isDark ? '#09090b' : '#ffffff';
+                riskChart.options.plugins.legend.labels.color = isDark ? '#a1a1aa' : '#6b7280';
+                riskChart.update();
+            }
+        }
+        
+        // --- UI HELPER: MATCH JAIL TO DOUGHNUT CHART COLORS ---
+        function getJailBadgeStyle(jailName) {
+            const j = jailName.toLowerCase();
+            const baseStyle = 'font-size: 0.70rem; ';
+            
+            if (j.match(/(sqli|xss|lfi|revshell|webshell|ssti|ssrf|jndi|prestashop|atlassian|wordpress|drupal|nginx|apache)/)) 
+                return baseStyle + 'background-color: rgba(239, 68, 68, 0.15); color: #ef4444; border: 1px solid rgba(239,68,68,0.3);';
+            if (j.match(/(portscan|scan|bot|mapper|enum|hunter|proxy)/)) 
+                return baseStyle + 'background-color: rgba(59, 130, 246, 0.15); color: #3b82f6; border: 1px solid rgba(59,130,246,0.3);';
+            if (j.match(/(recidive|postfix|dovecot|exim|mail)/)) 
+                return baseStyle + 'background-color: rgba(249, 115, 22, 0.15); color: #f97316; border: 1px solid rgba(249,115,22,0.3);';
+            if (j.match(/(flood|limit|ddos)/)) 
+                return baseStyle + 'background-color: rgba(107, 114, 128, 0.15); color: var(--sw-text); border: 1px solid var(--sw-border);';
+            return baseStyle + 'background-color: rgba(234, 179, 8, 0.15); color: #eab308; border: 1px solid rgba(234,179,8,0.3);';
+        }
+
+        // --- DATA INGESTION ENGINE ---
+        async function fetchTelemetry() {
+            try {
+                const response = await fetch(`data.json?t=${new Date().getTime()}`);
+                if (!response.ok) throw new Error('HTTP request failed');
+                const data = await response.json();
+
+                // Status Spinner -> Online
+                const spinner = document.getElementById('status-spinner');
+                if (spinner) {
+                    spinner.classList.remove('text-danger');
+                    spinner.classList.add('text-success');
+                }
+
+                // System Metrics
+                document.getElementById('sys-hostname').innerText = data.system.hostname;
+                if(data.system.ip) {
+                    document.getElementById('sys-ip').innerText = data.system.ip;
+                }
+                document.getElementById('sys-uptime').innerText = data.system.uptime;
+                
+                // Hardware Header
+                if (document.getElementById('hw-cores')) {
+                    document.getElementById('hw-cores').innerText = data.system.cores || '--';
+                    document.getElementById('hw-arch').innerText = data.system.arch || '--';
+                    document.getElementById('hw-os').innerText = data.system.os || '--';
+                    document.getElementById('hw-cpu').innerText = data.system.cpu_model || '--';
+                    
+                    const fetchTime = new Date();
+                    document.getElementById('hw-update').innerText = fetchTime.toLocaleTimeString([], { hour12: false, hour: '2-digit', minute:'2-digit', second:'2-digit' });
+                }
+                
+                const ramUsed = parseInt(data.system.ram_used_mb) || 0;
+                const ramTotal = parseInt(data.system.ram_total_mb) || 1;
+                document.getElementById('sys-ram').innerText = `${ramUsed.toLocaleString()} / ${ramTotal.toLocaleString()} MB`;
+                
+                const diskUsed = (parseInt(data.system.disk_used_mb) / 1024).toFixed(1);
+                const diskTotal = (parseInt(data.system.disk_total_mb) / 1024).toFixed(1);
+                document.getElementById('sys-disk').innerText = `${diskUsed} / ${diskTotal} GB`;
+
+                const sysLoadEl = document.getElementById('sys-load');
+                sysLoadEl.innerText = data.system.load_average;
+                const load1m = parseFloat(data.system.load_average.split(',')[0]);
+                sysLoadEl.classList.remove('text-success', 'text-warning', 'text-danger');
+                sysLoadEl.classList.add(load1m <= 0.35 ? 'text-success' : load1m <= 0.70 ? 'text-warning' : 'text-danger');
+
+                // Flat Services Listing (Horizontal inline rendering)
+                const srvEl = document.getElementById('sys-services-list');
+                if(data.system.services && srvEl) {
+                    srvEl.innerHTML = data.system.services.map(srv => {
+                        const shortName = srv.name.split(' ')[0];
+                        const statusClass = srv.status === 'active' ? 'text-success' : 'text-danger';
+                        return `<span class="text-muted">${shortName}:</span> <span class="${statusClass}">${srv.status.toUpperCase()}</span>`;
+                    }).join(' <span class="text-muted opacity-50 px-2">|</span> ');
+                }
+
+                // Layer 3 & 7 Metrics
+                document.getElementById('l3-global').innerText = parseInt(data.layer3.global_blocked).toLocaleString();
+                document.getElementById('l3-geoip').innerText = parseInt(data.layer3.geoip_blocked).toLocaleString();
+                document.getElementById('l3-asn').innerText = parseInt(data.layer3.asn_blocked).toLocaleString();
+                document.getElementById('l7-banned').innerText = parseInt(data.layer7.total_banned).toLocaleString();
+                document.getElementById('l7-jails').innerText = data.layer7.active_jails;
+                document.getElementById('wl-count').innerText = data.whitelist.active_ips;
+
+                // Signal vs Noise Calculation
+                const l3Blocked = parseInt(data.layer3.global_blocked) || 0;
+                const l7Banned = parseInt(data.layer7.total_banned) || 0;
+                const totalThreats = l3Blocked + l7Banned;
+                
+                let noisePercent = 0;
+                let signalPercent = 0;
+                
+                if (totalThreats > 0) {
+                    noisePercent = ((l3Blocked / totalThreats) * 100).toFixed(2);
+                    signalPercent = ((l7Banned / totalThreats) * 100).toFixed(2);
+                }
+
+                document.getElementById('noise-pct').innerText = `${noisePercent}%`;
+                document.getElementById('noise-bar').style.width = `${noisePercent}%`;
+
+                document.getElementById('signal-pct').innerText = `${signalPercent}%`;
+                document.getElementById('signal-bar').style.width = `${signalPercent}%`;
+                
+                // Inject Doughnut Data
+                if(riskChart && data.layer7.risk_radar) {
+                    riskChart.data.datasets[0].data = data.layer7.risk_radar;
+                    riskChart.update();
+                }
+
+                // Renderers (Threat Intel Tables)
+                document.getElementById('whitelist-ips-list').innerHTML = data.whitelist.ips.map(ip => `<li class="mb-1 opacity-75">${ip}</li>`).join('');
+
+                const topIpsEl = document.getElementById('top-ips-list');
+                if(data.layer7.top_attackers.length > 0) {
+                    topIpsEl.innerHTML = data.layer7.top_attackers.map(attacker => `
+                        <tr>
+                            <td class="align-middle py-3 ps-4 font-mono"><a href="https://www.abuseipdb.com/check/${attacker.ip}" target="_blank" rel="noopener noreferrer" class="text-decoration-none ip-font" style="color: var(--sw-text);">${attacker.ip}</a></td>
+                            <td class="align-middle py-3 font-mono">
+                                <span class="badge rounded-pill" style="background-color: rgba(59, 130, 246, 0.15); color: #3b82f6; border: 1px solid rgba(59,130,246,0.3); font-size: 0.70rem;">
+                                    ${attacker.port || 'N/A'}
+                                </span>
+                            </td>
+                            <td class="text-end align-middle py-3 pe-4 font-mono text-body-secondary">${attacker.count.toLocaleString()}</td>
+                        </tr>`).join('');
+                } else { topIpsEl.innerHTML = `<tr><td colspan="3" class="text-center text-muted small py-4">No attackers recorded.</td></tr>`; }
+
+                const jailsEl = document.getElementById('top-jails-list');
+                if(data.layer7.jails_data.length > 0) {
+                    jailsEl.innerHTML = [...data.layer7.jails_data].sort((a, b) => b.count - a.count).map(jail => {
+                        const mitreId = jail.mitre ? jail.mitre.split(':')[0] : 'T1499';
+                        const mitreLabel = jail.mitre || 'Unknown';
+                        
+                        return `
+                        <tr>
+                            <td class="align-middle py-3 ps-4 font-mono"><span class="badge rounded-pill" style="${getJailBadgeStyle(jail.name)}">${jail.name}</span></td>
+                            <td class="align-middle py-3 font-mono">
+                                <a href="https://attack.mitre.org/techniques/${mitreId}/" target="_blank" rel="noopener noreferrer" class="text-decoration-none badge rounded-pill" style="${getJailBadgeStyle(jail.name)} font-size: 0.70rem;">
+                                    ${mitreLabel}
+                                </a>
+                            </td>
+                            <td class="text-end align-middle py-3 pe-4 font-mono text-body-secondary">${jail.count}</td>
+                        </tr>`;
+                    }).join('');
+                } else { jailsEl.innerHTML = `<tr><td colspan="3" class="text-center text-muted small py-4">No active jails loaded.</td></tr>`; }
+
+                const bannedEl = document.getElementById('banned-ips-list');
+                if(data.layer7.banned_ips.length > 0) {
+                    bannedEl.innerHTML = [...data.layer7.banned_ips].reverse().map(entry => {
+                        const mitreId = entry.mitre ? entry.mitre.split(':')[0] : 'T1499';
+                        const mitreLabel = entry.mitre || 'Unknown';
+                        
+                        // Removed the Timestamp column entirely as requested
+                        return `
+                        <tr>
+                            <td class="align-middle py-3 ps-4 font-mono"><a href="https://www.abuseipdb.com/check/${entry.ip}" target="_blank" rel="noopener noreferrer" class="text-decoration-none ip-font" style="color: var(--sw-text);">${entry.ip}</a></td>
+                            <td class="align-middle py-3 font-mono"><span class="badge rounded-pill" style="${getJailBadgeStyle(entry.jail)}">${entry.jail}</span></td>
+                            <td class="align-middle py-3 ps-3 font-mono">
+                                <a href="https://attack.mitre.org/techniques/${mitreId}/" target="_blank" rel="noopener noreferrer" class="text-decoration-none badge rounded-pill" style="${getJailBadgeStyle(entry.jail)} font-size: 0.70rem;">
+                                    ${mitreLabel}
+                                </a>
+                            </td>
+                            <td class="align-middle py-3 ps-4 pe-4 font-mono text-muted small text-nowrap" style="font-size: 0.75rem;">${entry.payload || 'N/A'}</td>
+                        </tr>`
+                    }).join('');
+                } else { 
+                    bannedEl.innerHTML = `<tr><td colspan="4" class="text-center text-muted small py-5">Registry is empty. Architecture is secure.</td></tr>`; 
+                }
+
+            } catch (error) {
+                console.error("Telemetry Sync Error:", error);
+                
+                const spinner = document.getElementById('status-spinner');
+                if (spinner) {
+                    spinner.classList.remove('text-success');
+                    spinner.classList.add('text-danger');
+                }
+            }
+        }
+        
+        async function fetchGitHubData() {
+            try {
+                const repoRes = await fetch('https://api.github.com/repos/duggytuxy/syswarden');
+                if (repoRes.ok) {
+                    const repoData = await repoRes.json();
+                    document.getElementById('gh-stars').innerText = repoData.stargazers_count;
+                }
+                
+                const relRes = await fetch('https://api.github.com/repos/duggytuxy/syswarden/releases/latest');
+                if (relRes.ok) {
+                    const relData = await relRes.json();
+                    document.getElementById('gh-release').innerText = relData.tag_name;
+                }
+            } catch (error) {
+                console.warn("GitHub API Fetch Error:", error);
+                document.getElementById('gh-stars').innerText = "N/A";
+                document.getElementById('gh-release').innerText = "N/A";
+            }
+        }
+        
+        fetchGitHubData();
+
+        fetchTelemetry();
+        setInterval(fetchTelemetry, 5000);
+    });
+    </script>
 </body>
 </html>
 EOF
-
-    # 2. Generating the JS Logic (SPA Routing & Performance Engine)
-    cat <<'EOF' >"$UI_DIR/app.js"
-let threatChart = null;
-let riskChart = null;
-// --- 24H TIMELINE CONFIG ---
-// 17280 points = 24 hours
-const MAX_DATA_POINTS = 17280;
-
-document.addEventListener('DOMContentLoaded', () => {
-    
-    // --- SPA ROUTER & SIDEBAR ---
-    const navItems = document.querySelectorAll('.nav-item-sw');
-    const viewSections = document.querySelectorAll('.view-section');
-    const sidebar = document.getElementById('sidebar');
-    const overlay = document.getElementById('sidebarOverlay');
-    const sidebarToggle = document.getElementById('sidebarToggle');
-
-    function switchView(targetViewId) {
-        navItems.forEach(item => {
-            item.classList.remove('active');
-            if(item.getAttribute('data-view') === targetViewId) item.classList.add('active');
-        });
-        
-        viewSections.forEach(section => {
-            if(section.id === 'view-' + targetViewId) {
-                section.style.display = 'block';
-                setTimeout(() => section.classList.add('active'), 50);
-            } else {
-                section.classList.remove('active');
-                setTimeout(() => section.style.display = 'none', 300);
-            }
-        });
-
-        localStorage.setItem('syswarden-view', targetViewId);
-        
-        if(window.innerWidth < 992) {
-            sidebar.classList.remove('show');
-            overlay.classList.remove('show');
-        }
-    }
-
-    navItems.forEach(item => {
-        item.addEventListener('click', (e) => {
-            e.preventDefault();
-            switchView(item.getAttribute('data-view'));
-        });
-    });
-
-    const savedView = localStorage.getItem('syswarden-view') || 'overview';
-    switchView(savedView);
-
-    // Sidebar Toggle Logic
-    sidebarToggle.addEventListener('click', () => {
-        if(window.innerWidth < 992) {
-            sidebar.classList.add('show');
-            overlay.classList.add('show');
-        } else {
-            sidebar.classList.toggle('collapsed');
-            localStorage.setItem('syswarden-sidebar', sidebar.classList.contains('collapsed') ? '1' : '0');
-        }
-    });
-    
-    overlay.addEventListener('click', () => {
-        sidebar.classList.remove('show');
-        overlay.classList.remove('show');
-    });
-
-    // Restore desktop sidebar state
-    if(window.innerWidth >= 992 && localStorage.getItem('syswarden-sidebar') === '1') {
-        sidebar.classList.add('collapsed');
-    }
-
-    // --- THEME ENGINE (ICONS) ---
-    const themeBtn = document.getElementById('theme-toggle-btn');
-    const iconSun = document.getElementById('icon-sun');
-    const iconMoon = document.getElementById('icon-moon');
-    
-    const applyThemeState = (isDark) => {
-        document.documentElement.setAttribute('data-bs-theme', isDark ? 'dark' : 'light');
-        if(isDark) {
-            iconMoon.classList.add('d-none');
-            iconSun.classList.remove('d-none');
-        } else {
-            iconSun.classList.add('d-none');
-            iconMoon.classList.remove('d-none');
-        }
-        updateChartTheme(isDark ? 'dark' : 'light');
-    };
-
-    const toggleTheme = () => {
-        const currentTheme = document.documentElement.getAttribute('data-bs-theme');
-        const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
-        localStorage.setItem('syswarden-theme', newTheme);
-        applyThemeState(newTheme === 'dark');
-    };
-
-    themeBtn.addEventListener('click', toggleTheme);
-
-    // Initial Theme Load
-    const savedTheme = localStorage.getItem('syswarden-theme');
-    if (savedTheme) {
-        applyThemeState(savedTheme === 'dark');
-    } else {
-        applyThemeState(window.matchMedia('(prefers-color-scheme: dark)').matches);
-    }
-
-    // --- CHART.JS INITIALIZATION (PURE STACKED AREA CHART MULTI-VECTORS) ---
-    const chartData = {
-        labels: [],
-        datasets: [
-            {
-                label: 'Exploits', data: [],
-                backgroundColor: '#ef4444',
-                borderWidth: 0, fill: true, cubicInterpolationMode: 'monotone', pointRadius: 0, pointHoverRadius: 6
-            },
-            {
-                label: 'Brute-Force', data: [],
-                backgroundColor: '#eab308',
-                borderWidth: 0, fill: true, cubicInterpolationMode: 'monotone', pointRadius: 0, pointHoverRadius: 6
-            },
-            {
-                label: 'Recon', data: [],
-                backgroundColor: '#3b82f6',
-                borderWidth: 0, fill: true, cubicInterpolationMode: 'monotone', pointRadius: 0, pointHoverRadius: 6
-            },
-            {
-                label: 'DDoS', data: [],
-                backgroundColor: '#6b7280', // Dynamic in Theme Updater
-                borderWidth: 0, fill: true, cubicInterpolationMode: 'monotone', pointRadius: 0, pointHoverRadius: 6
-            },
-            {
-                label: 'Abuse/Spam', data: [],
-                backgroundColor: '#f97316',
-                borderWidth: 0, fill: true, cubicInterpolationMode: 'monotone', pointRadius: 0, pointHoverRadius: 6
-            }
-        ]
-    };
-
-    try {
-        // 1. Timeline Chart (Stacked Area 24h)
-        const ctxThreat = document.getElementById('threatChart').getContext('2d');
-        threatChart = new Chart(ctxThreat, {
-            type: 'line', data: chartData,
-            options: {
-                responsive: true, maintainAspectRatio: false,
-                interaction: { mode: 'index', intersect: false },
-                plugins: { 
-                    legend: { display: false },
-                    tooltip: { animation: false, titleFont: { family: 'monospace', size: 13 }, bodyFont: { family: 'monospace', size: 12 }, padding: 12, cornerRadius: 8, displayColors: true }
-                },
-                scales: {
-                    x: { 
-                        display: true, 
-                        ticks: { maxTicksLimit: 12, maxRotation: 0, font: { family: 'monospace', size: 10 } },
-                        grid: { display: false }
-                    },
-                    y: { 
-                        stacked: true, 
-                        beginAtZero: true, 
-                        ticks: { font: { family: 'monospace', size: 11 } }, 
-                        border: { display: false } 
-                    }
-                },
-                animation: { duration: 0 }
-            }
-        });
-
-        // 2. Risk Doughnut Chart (Colors: Exploits, Brute-Force, Recon, DDoS, Abuse/Spam)
-        const ctxRadar = document.getElementById('riskChart').getContext('2d');
-        riskChart = new Chart(ctxRadar, {
-            type: 'doughnut',
-            data: {
-                labels: ['Exploits', 'Brute-Force', 'Recon', 'DDoS', 'Abuse/Spam'],
-                datasets: [{
-                    data: [0, 0, 0, 0, 0],
-                    backgroundColor: [
-                        '#ef4444', // Red
-                        '#eab308', // Yellow
-                        '#3b82f6', // Blue
-                        'var(--sw-chart-ddos)', // Black/Grey depending on theme
-                        '#f97316'  // Orange
-                    ],
-                    borderWidth: 2,
-                    borderColor: 'var(--sw-card-bg)'
-                }]
-            },
-            options: {
-                responsive: true, maintainAspectRatio: false, cutout: '65%',
-                plugins: { 
-                    legend: { position: 'bottom', labels: { padding: 20, font: { family: 'Roboto', size: 12, weight: '500' } } },
-                    tooltip: { padding: 10, cornerRadius: 8, bodyFont: { family: 'monospace', size: 13, weight: 'bold' } }
-                }
-            }
-        });
-    } catch (e) { console.warn("Chart.js init failed:", e); }
-
-    updateChartTheme(document.documentElement.getAttribute('data-bs-theme'));
-
-    function updateChartTheme(theme) {
-        if (!threatChart) return;
-        const isDark = theme === 'dark';
-        const gridColor = isDark ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)';
-        const textColor = isDark ? '#a1a1aa' : '#6b7280';
-        const ddosSolidBg = isDark ? '#fafafa' : '#27272a';
-        
-        threatChart.options.scales.x.ticks.color = textColor;
-        threatChart.options.scales.y.grid = { color: gridColor };
-        threatChart.options.scales.y.ticks.color = textColor;
-        threatChart.options.plugins.tooltip.backgroundColor = isDark ? 'rgba(24, 24, 27, 0.95)' : 'rgba(255, 255, 255, 0.95)';
-        threatChart.options.plugins.tooltip.titleColor = isDark ? '#fff' : '#000';
-        threatChart.options.plugins.tooltip.bodyColor = isDark ? '#a1a1aa' : '#4b5563';
-        threatChart.options.plugins.tooltip.borderColor = isDark ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)';
-        
-        // Update dynamic solid color for DDoS Area (No border needed)
-        threatChart.data.datasets[3].backgroundColor = ddosSolidBg;
-        threatChart.update();
-        
-        if(riskChart) {
-            riskChart.data.datasets[0].borderColor = isDark ? '#09090b' : '#ffffff';
-            riskChart.options.plugins.legend.labels.color = textColor;
-            riskChart.update();
-        }
-    }
-    
-    // --- UI HELPER: MATCH JAIL TO DOUGHNUT CHART COLORS ---
-    function getJailBadgeStyle(jailName) {
-        const j = jailName.toLowerCase();
-        // FIX: Global application of 0.70rem font size for perfect alignment with MITRE badges
-        const baseStyle = 'font-size: 0.70rem; ';
-        
-        // Exploits (Red)
-        if (j.match(/(sqli|xss|lfi|revshell|webshell|ssti|ssrf|jndi|prestashop|atlassian|wordpress|drupal|nginx|apache)/)) 
-            return baseStyle + 'background-color: rgba(239, 68, 68, 0.15); color: #ef4444; border: 1px solid rgba(239,68,68,0.3);';
-        // Recon (Blue)
-        if (j.match(/(portscan|scan|bot|mapper|enum|hunter|proxy)/)) 
-            return baseStyle + 'background-color: rgba(59, 130, 246, 0.15); color: #3b82f6; border: 1px solid rgba(59,130,246,0.3);';
-        // Abuse/Spam (Orange)
-        if (j.match(/(recidive|postfix|dovecot|exim|mail)/)) 
-            return baseStyle + 'background-color: rgba(249, 115, 22, 0.15); color: #f97316; border: 1px solid rgba(249,115,22,0.3);';
-        // DDoS (Dark Grey/Theme Contrast)
-        if (j.match(/(flood|limit|ddos)/)) 
-            return baseStyle + 'background-color: rgba(107, 114, 128, 0.15); color: var(--sw-text); border: 1px solid var(--sw-border);';
-        // Brute-Force / Default (Yellow)
-        return baseStyle + 'background-color: rgba(234, 179, 8, 0.15); color: #eab308; border: 1px solid rgba(234,179,8,0.3);';
-    }
-
-    // --- DATA INGESTION ENGINE ---
-    async function fetchTelemetry() {
-        try {
-            const response = await fetch(`data.json?t=${new Date().getTime()}`);
-            if (!response.ok) throw new Error('HTTP request failed');
-            const data = await response.json();
-
-            // Status Spinner -> Online
-            const spinner = document.getElementById('status-spinner');
-            if (spinner) {
-                spinner.classList.remove('text-danger');
-                spinner.classList.add('text-success');
-            }
-
-            // System Metrics
-            document.getElementById('sys-hostname').innerText = data.system.hostname;
-            if(data.system.ip) {
-                document.getElementById('sys-ip').innerText = data.system.ip;
-            }
-            document.getElementById('sys-uptime').innerText = data.system.uptime;
-            
-            // NEW: Bind Hardware Banner Data
-            if (document.getElementById('hw-cores')) {
-                document.getElementById('hw-cores').innerText = data.system.cores || '--';
-                document.getElementById('hw-arch').innerText = data.system.arch || '--';
-                document.getElementById('hw-os').innerText = data.system.os || '--';
-                document.getElementById('hw-cpu').innerText = data.system.cpu_model || '--';
-                
-                // Format the exact client-side fetch time for "Last update"
-                const fetchTime = new Date();
-                document.getElementById('hw-update').innerText = fetchTime.toLocaleTimeString([], { hour12: false, hour: '2-digit', minute:'2-digit', second:'2-digit' });
-            }
-            
-            const ramUsed = parseInt(data.system.ram_used_mb) || 0;
-            const ramTotal = parseInt(data.system.ram_total_mb) || 1;
-            const ramPercent = Math.round((ramUsed / ramTotal) * 100);
-            document.getElementById('sys-ram').innerText = `${ramUsed.toLocaleString()} / ${ramTotal.toLocaleString()} MB`;
-            const ramBar = document.getElementById('ram-progress');
-            ramBar.style.width = `${ramPercent}%`;
-            ramBar.className = `progress-bar ${ramPercent > 85 ? 'bg-danger' : ramPercent > 60 ? 'bg-warning' : 'bg-primary'}`;
-            
-            const diskUsed = (parseInt(data.system.disk_used_mb) / 1024).toFixed(1);
-            const diskTotal = (parseInt(data.system.disk_total_mb) / 1024).toFixed(1);
-            const diskPercent = Math.round((diskUsed / diskTotal) * 100) || 0;
-            document.getElementById('sys-disk').innerText = `${diskUsed} / ${diskTotal} GB`;
-            const diskBar = document.getElementById('disk-progress');
-            diskBar.style.width = `${diskPercent}%`;
-            diskBar.className = `progress-bar ${diskPercent > 85 ? 'bg-danger' : diskPercent > 70 ? 'bg-warning' : 'bg-info'}`;
-
-            const sysLoadEl = document.getElementById('sys-load');
-            sysLoadEl.innerText = data.system.load_average;
-            const load1m = parseFloat(data.system.load_average.split(',')[0]);
-            sysLoadEl.classList.remove('text-success', 'text-warning', 'text-danger');
-            sysLoadEl.classList.add(load1m <= 0.35 ? 'text-success' : load1m <= 0.70 ? 'text-warning' : 'text-danger');
-
-            // Layer 3 & 7 Metrics
-            document.getElementById('l3-global').innerText = parseInt(data.layer3.global_blocked).toLocaleString();
-            document.getElementById('l3-geoip').innerText = parseInt(data.layer3.geoip_blocked).toLocaleString();
-            document.getElementById('l3-asn').innerText = parseInt(data.layer3.asn_blocked).toLocaleString();
-            document.getElementById('l7-banned').innerText = parseInt(data.layer7.total_banned).toLocaleString();
-            document.getElementById('l7-jails').innerText = data.layer7.active_jails;
-            document.getElementById('wl-count').innerText = data.whitelist.active_ips;
-
-            // --- DEVSECOPS FIX: SIGNAL VS NOISE CALCULATION ---
-            const l3Blocked = parseInt(data.layer3.global_blocked) || 0;
-            const l7Banned = parseInt(data.layer7.total_banned) || 0;
-            const totalThreats = l3Blocked + l7Banned;
-            
-            let noisePercent = 0;
-            let signalPercent = 0;
-            
-            if (totalThreats > 0) {
-                noisePercent = ((l3Blocked / totalThreats) * 100).toFixed(2);
-                signalPercent = ((l7Banned / totalThreats) * 100).toFixed(2);
-            }
-
-            // Update DOM
-            document.getElementById('noise-pct').innerText = `${noisePercent}%`;
-            document.getElementById('noise-bar').style.width = `${noisePercent}%`;
-
-            document.getElementById('signal-pct').innerText = `${signalPercent}%`;
-            document.getElementById('signal-bar').style.width = `${signalPercent}%`;
-            // ----------------------------------------------------
-            
-            // Inject Services Table
-            const srvEl = document.getElementById('sys-services-list');
-            if(data.system.services && srvEl) {
-                srvEl.innerHTML = data.system.services.map(srv => `
-                    <tr>
-                        <td class="text-body align-middle py-2 ps-4 font-mono">
-                            <div style="font-size: 0.85rem;">${srv.name}</div>
-                            <div class="text-muted" style="font-size: 0.65rem; letter-spacing: 0.5px;">${srv.path || 'Path unavailable'}</div>
-                        </td>
-                        <td class="text-end align-middle py-2 pe-4">
-                            ${srv.status === 'active' 
-                                ? '<span class="badge bg-success bg-opacity-10 text-success rounded-pill border border-success border-opacity-25 px-3 py-1 d-inline-flex align-items-center justify-content-center" style="min-width: 80px; font-weight: 600; letter-spacing: 0.5px;">ACTIVE</span>' 
-                                : '<span class="badge bg-danger bg-opacity-10 text-danger rounded-pill border border-danger border-opacity-25 px-3 py-1 d-inline-flex align-items-center justify-content-center" style="min-width: 80px; font-weight: 600; letter-spacing: 0.5px;">OFFLINE</span>'}
-                        </td>
-                    </tr>`).join('');
-            }
-
-            // NEW: Inject Network Ports Table
-            const portsEl = document.getElementById('network-ports-list');
-            if(data.system.ports && portsEl) {
-                if(data.system.ports.length > 0) {
-                    portsEl.innerHTML = data.system.ports.map(p => {
-                        // FIX: Fallback to " - " if values are missing, unknown, or equal to an asterisk "*"
-                        const safeIp = (p.ip && p.ip.trim() !== '' && p.ip !== '*') ? p.ip : ' - ';
-                        const safeState = (p.state && p.state.trim() !== '' && p.state !== '*') ? p.state : ' - ';
-                        const safePort = (p.port && p.port.trim() !== '' && p.port !== '*') ? p.port : ' - ';
-                        
-                        // Dynamic styling based on socket state
-                        let stateBadge = '';
-                        if (safeState === ' - ') {
-                            // Render a simple dash if the state is unknown, without the pill badge format
-                            stateBadge = `<span class="text-muted fw-bold mx-2">${safeState}</span>`;
-                        } else {
-                            const stateStyle = (safeState.toUpperCase() === 'LISTEN') 
-                                ? 'background-color: rgba(16, 185, 129, 0.15); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.3);' 
-                                : 'background-color: rgba(107, 114, 128, 0.15); color: var(--sw-text); border: 1px solid var(--sw-border);';
-                            stateBadge = `<span class="badge rounded-pill" style="${stateStyle} font-size: 0.70rem;">${safeState}</span>`;
-                        }
-                            
-                        return `
-                        <tr>
-                            <td class="align-middle py-3 ps-4 font-mono text-muted small">${p.interface || ' - '}</td>
-                            <td class="align-middle py-3 font-mono">${safeIp}</td>
-                            <td class="align-middle py-3 font-mono">${p.process || ' - '}</td>
-                            <td class="align-middle py-3 font-mono">
-                                ${stateBadge}
-                            </td>
-                            <td class="align-middle py-3 font-mono fw-bold" style="color: var(--sw-brand-icon);">${safePort}</td>
-                            <td class="align-middle py-3 pe-4 font-mono text-muted small">${p.protocol || ' - '}</td>
-                        </tr>`;
-                    }).join('');
-                } else {
-                    portsEl.innerHTML = `<tr><td colspan="6" class="text-center text-muted small py-5">No active network ports detected.</td></tr>`;
-                }
-            }
-
-            // Inject Doughnut Data
-            if(riskChart && data.layer7.risk_radar) {
-                riskChart.data.datasets[0].data = data.layer7.risk_radar;
-                riskChart.update();
-            }
-
-            // Renderers (Threat Intel Tables)
-            document.getElementById('whitelist-ips-list').innerHTML = data.whitelist.ips.map(ip => `<li class="mb-1 opacity-75">${ip}</li>`).join('');
-
-            const topIpsEl = document.getElementById('top-ips-list');
-            if(data.layer7.top_attackers.length > 0) {
-                topIpsEl.innerHTML = data.layer7.top_attackers.map(attacker => `
-                    <tr>
-                        <td class="align-middle py-3 ps-4 font-mono"><a href="https://www.abuseipdb.com/check/${attacker.ip}" target="_blank" rel="noopener noreferrer" class="text-decoration-none ip-font" style="color: var(--sw-text);">${attacker.ip}</a></td>
-                        <td class="align-middle py-3 font-mono">
-                            <span class="badge rounded-pill" style="background-color: rgba(59, 130, 246, 0.15); color: #3b82f6; border: 1px solid rgba(59,130,246,0.3); font-size: 0.70rem;">
-                                ${attacker.port || 'N/A'}
-                            </span>
-                        </td>
-                        <td class="text-end align-middle py-3 pe-4 font-mono text-body-secondary">${attacker.count.toLocaleString()}</td>
-                    </tr>`).join('');
-            } else { topIpsEl.innerHTML = `<tr><td colspan="3" class="text-center text-muted small py-4">No attackers recorded.</td></tr>`; }
-
-            const jailsEl = document.getElementById('top-jails-list');
-            if(data.layer7.jails_data.length > 0) {
-                jailsEl.innerHTML = [...data.layer7.jails_data].sort((a, b) => b.count - a.count).map(jail => {
-                    // Extraction MITRE
-                    const mitreId = jail.mitre ? jail.mitre.split(':')[0] : 'T1499';
-                    const mitreLabel = jail.mitre || 'Unknown';
-                    
-                    return `
-                    <tr>
-                        <td class="align-middle py-3 ps-4 font-mono"><span class="badge rounded-pill" style="${getJailBadgeStyle(jail.name)}">${jail.name}</span></td>
-                        <td class="align-middle py-3 font-mono">
-                            <a href="https://attack.mitre.org/techniques/${mitreId}/" target="_blank" rel="noopener noreferrer" class="text-decoration-none badge rounded-pill" style="${getJailBadgeStyle(jail.name)} font-size: 0.70rem;">
-                                ${mitreLabel}
-                            </a>
-                        </td>
-                        <td class="text-end align-middle py-3 pe-4 font-mono text-body-secondary">${jail.count}</td>
-                    </tr>`;
-                }).join('');
-            } else { jailsEl.innerHTML = `<tr><td colspan="3" class="text-center text-muted small py-4">No active jails loaded.</td></tr>`; }
-
-            const bannedEl = document.getElementById('banned-ips-list');
-            if(data.layer7.banned_ips.length > 0) {
-                bannedEl.innerHTML = [...data.layer7.banned_ips].reverse().map(entry => {
-                    // Extract MITRE ID for the hyperlink (e.g., "T1110" from "T1110: Brute Force")
-                    const mitreId = entry.mitre ? entry.mitre.split(':')[0] : 'T1499';
-                    const mitreLabel = entry.mitre || 'Unknown';
-                    
-                    // UI/UX FIX: Added matching padding-start (ps-3, ps-4) to data cells 
-                    // to perfectly align with the newly aerated table headers.
-                    return `
-                    <tr>
-                        <td class="align-middle py-3 ps-4 font-mono"><a href="https://www.abuseipdb.com/check/${entry.ip}" target="_blank" rel="noopener noreferrer" class="text-decoration-none ip-font" style="color: var(--sw-text);">${entry.ip}</a></td>
-                        <td class="align-middle py-3 font-mono"><span class="badge rounded-pill" style="${getJailBadgeStyle(entry.jail)}">${entry.jail}</span></td>
-                        <td class="align-middle py-3 ps-3 font-mono">
-                            <a href="https://attack.mitre.org/techniques/${mitreId}/" target="_blank" rel="noopener noreferrer" class="text-decoration-none badge rounded-pill" style="${getJailBadgeStyle(entry.jail)} font-size: 0.70rem;">
-                                ${mitreLabel}
-                            </a>
-                        </td>
-                        <td class="align-middle py-3 ps-4 font-mono text-muted small" style="font-size: 0.75rem;">${entry.timestamp || 'N/A'}</td>
-                        <td class="align-middle py-3 ps-4 pe-4 font-mono text-muted small text-nowrap" style="font-size: 0.75rem;">${entry.payload || 'N/A'}</td>
-                    </tr>`
-                }).join('');
-            } else { 
-                bannedEl.innerHTML = `<tr><td colspan="5" class="text-center text-muted small py-5">Registry is empty. Architecture is secure.</td></tr>`; 
-            }
-
-            // Chart Updater (Live Timeline 24H - Stacked Area Vectors)
-            const now = new Date();
-            const timeString = now.toLocaleTimeString([], { hour12: false, hour: '2-digit', minute:'2-digit' });
-
-            if (threatChart && data.layer7.risk_radar) {
-                chartData.labels.push(timeString);
-                
-                // Risk Radar Array Mapping:
-                // 0: Exploits, 1: Brute-Force, 2: Recon, 3: DDoS, 4: Abuse/Spam
-                chartData.datasets[0].data.push(data.layer7.risk_radar[0]);
-                chartData.datasets[1].data.push(data.layer7.risk_radar[1]);
-                chartData.datasets[2].data.push(data.layer7.risk_radar[2]);
-                chartData.datasets[3].data.push(data.layer7.risk_radar[3]);
-                chartData.datasets[4].data.push(data.layer7.risk_radar[4]);
-
-                if (chartData.labels.length > MAX_DATA_POINTS) {
-                    chartData.labels.shift();
-                    chartData.datasets.forEach(ds => ds.data.shift());
-                }
-                threatChart.update();
-            }
-        } catch (error) {
-            console.error("Telemetry Sync Error:", error);
-            
-            // Status Spinner -> Offline (Red)
-            const spinner = document.getElementById('status-spinner');
-            if (spinner) {
-                spinner.classList.remove('text-success');
-                spinner.classList.add('text-danger');
-            }
-        }
-    }
-    
-    // --- GITHUB API FETCH (Executes ONCE on page load to prevent rate-limiting) ---
-    async function fetchGitHubData() {
-        try {
-            // Fetch Repo Stars
-            const repoRes = await fetch('https://api.github.com/repos/duggytuxy/syswarden');
-            if (repoRes.ok) {
-                const repoData = await repoRes.json();
-                document.getElementById('gh-stars').innerText = repoData.stargazers_count;
-            }
-            
-            // Fetch Latest Release Version
-            const relRes = await fetch('https://api.github.com/repos/duggytuxy/syswarden/releases/latest');
-            if (relRes.ok) {
-                const relData = await relRes.json();
-                document.getElementById('gh-release').innerText = relData.tag_name;
-            }
-        } catch (error) {
-            console.warn("GitHub API Fetch Error:", error);
-            document.getElementById('gh-stars').innerText = "N/A";
-            document.getElementById('gh-release').innerText = "N/A";
-        }
-    }
-    
-    // Initialize GitHub Fetch
-    fetchGitHubData();
-
-    fetchTelemetry();
-    setInterval(fetchTelemetry, 5000);
-});
-EOF
-
-    chmod 644 "$UI_DIR/index.html" "$UI_DIR/app.js"
 
     # --- 3. DYNAMIC ACCESS CONTROL (Nginx IP Whitelisting) ---
     local NGINX_ALLOW_RULES=""
@@ -6673,12 +6122,11 @@ server {
     index index.html;
 
     include mime.types;
-    # SECURITY FIX: Removed custom woff2 type block. Modern Nginx already includes it in mime.types.
 
     # --- Security Access Control ---
 $(echo -e "$NGINX_ALLOW_RULES")
 
-    # --- Strict Security Headers (Updated CSP for Bootstrap & ChartJS Source Maps) ---
+    # --- Strict Security Headers ---
     add_header Content-Security-Policy "default-src 'self'; connect-src 'self' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://api.github.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com;" always;
     add_header X-Frame-Options "DENY" always;
     add_header X-Content-Type-Options "nosniff" always;
@@ -6718,13 +6166,9 @@ EOF
         fi
     elif [[ "$FIREWALL_BACKEND" == "nftables" ]]; then
         if nft list chain inet filter input >/dev/null 2>&1; then
-            # HOTFIX: grep >/dev/null prevents SIGPIPE pipefail crashes
             if ! nft list chain inet filter input 2>/dev/null | grep "tcp dport 9999 accept" >/dev/null; then
-                # 1. Inject the rule to open port 9999 directly into the active kernel RAM
                 nft insert rule inet filter input tcp dport 9999 accept 2>/dev/null || true
             fi
-
-            # 2. Persistence: Ensure the include is present WITHOUT overwriting native config
             if ! grep -q 'include "/etc/syswarden/syswarden.nft"' /etc/nftables.conf 2>/dev/null; then
                 echo -e '\n# Added by SysWarden' >>/etc/nftables.conf
                 echo 'include "/etc/syswarden/syswarden.nft"' >>/etc/nftables.conf
@@ -6747,10 +6191,6 @@ EOF
         systemctl restart nginx >/dev/null 2>&1 || true
     fi
 
-    # --- HOTFIX: DYNAMIC IP RESOLUTION ---
-    # 1. Tries to get the Public IPv4 via curl or wget
-    # 2. Fallbacks to the primary active local IP via routing table if offline
-    # 3. Failsafe to '<YOUR_IP>' if everything else fails
     local SERVER_IP
     SERVER_IP=$(curl -sL4 https://ifconfig.me 2>/dev/null || wget -qO- https://ifconfig.me 2>/dev/null || ip -4 route get 1.1.1.1 2>/dev/null | awk '/src/ {for (i=1; i<=NF; i++) if ($i == "src") print $(i+1)}' | head -n 1 || echo "<YOUR_IP>")
 
@@ -7362,7 +6802,7 @@ if [[ "$MODE" != "update" ]] && [[ "$MODE" != "uninstall" ]]; then
     echo -e "${RED}███████║   ██║   ███████║╚███╔███╔╝██║  ██║██║  ██║██████╔╝███████╗██║ ╚████║${NC}"
     echo -e "${RED}╚══════╝   ╚═╝   ╚══════╝ ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝ ╚══════╝╚═╝  ╚═══╝${NC}"
     echo -e "${BLUE}===================================================================================${NC}"
-    echo -e "${GREEN}               Advanced Firewall & Blocklist Orchestrator | v2.50                  ${NC}"
+    echo -e "${GREEN}               Advanced Firewall & Blocklist Orchestrator | v2.51                  ${NC}"
     echo -e "${BLUE}===================================================================================${NC}\n"
 fi
 
@@ -7401,7 +6841,7 @@ if [[ "$MODE" != "update" ]]; then
         CYAN='\033[0;36m'
         clear
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
-        echo -e "${GREEN}${BOLD}                   SYSWARDEN v2.50 - PRE-FLIGHT CHECKLIST                     ${NC}"
+        echo -e "${GREEN}${BOLD}                   SYSWARDEN v2.51 - PRE-FLIGHT CHECKLIST                     ${NC}"
         echo -e "${BLUE}${BOLD}==============================================================================${NC}"
         echo -e "Before proceeding with the deployment, please ensure you have the following"
         echo -e "information ready. If you lack any required data, press [Ctrl+C] to abort,"
